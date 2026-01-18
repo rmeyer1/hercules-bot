@@ -86,14 +86,6 @@ async function callAI(model, prompt, systemContext = FRAMEWORK_CONTEXT) {
   }
 }
 
-  const response = await axios.post(url, body, { headers });
-  
-  if (model === 'gemini') {
-    return response.data.candidates[0].content.parts[0].text;
-  } else {
-    return response.data.choices[0].message.content;
-  }
-
 // Helper to show typing indicator every ~4 seconds (Telegram resets after ~5 s)
 async function showTyping(ctx, stopSignal = { stop: false }) {
   const chatId = ctx.chat.id;
