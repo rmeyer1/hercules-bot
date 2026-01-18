@@ -4,7 +4,8 @@ import sys
 import asyncio
 import io
 from dotenv import load_dotenv
-from telegram import Update, ChatAction
+from telegram import Update
+from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, CallbackContext
 import requests
 from xai_sdk import Client as XAIClient  # For Grok with tools
