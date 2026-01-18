@@ -41,42 +41,50 @@ General: Enter high IV expected to fall. Positive theta, negative vega. Defined 
 
 // Function to call the selected API with web search support
 async function callAI(model, prompt, systemContext = FRAMEWORK_CONTEXT) {
+  console.log(`[callAI] Starting call for model: ${model}`);
+
   let url, headers, body;
 
-  if (model === 'grok') {
-    url = 'https://api.x.ai/v1/chat/completions';
-    headers = { Authorization: `Bearer ${process.env.GROK_API_KEY}`, 'Content-Type': 'application/json' };
-    body = {
-      model: 'grok-4-1-fast-reasoning',
-      messages: [
-        { role: 'system', content: systemContext },
-        { role: 'user', content: prompt },
-      ],
-      tools: [{ type: 'x_search' }, { type: 'code_execution' }, { type: 'web_search' }], // Enable web search
-    };
-  } else if (model === 'openai') {
-    url = 'https://api.openai.com/v1/chat/completions';
-    headers = { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' };
-    body = {
-      model: 'gpt-4o-search-preview', // Use search-enabled model for web access
-      messages: [
-        { role: 'system', content: systemContext },
-        { role: 'user', content: prompt },
-      ],
-    };
-  } else if (model === 'gemini') {
-    url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key=${process.env.GEMINI_API_KEY}`;
-    headers = { 'Content-Type': 'application/json' };
-    body = {
-      contents: [
-        { parts: [{ text: `${systemContext}\n\n${prompt}` }] },
-      ],
-      grounding: { source: 'GOOGLE_SEARCH' }, // Enable built-in web search
-    };
-    // Gemini response format differs; adjust parsing below
-  } else {
-    throw new Error('Invalid model selected');
+  try {
+    if (model === 'grok') {
+      url = 'https://api.x.ai/v1/chat/completions';
+      headers = { Authorization: `Bearer ${process.env.GROK_API_KEY}`, 'Content-Type': 'application/json' };
+      body = { /* ... */ };
+    } else if (model === 'openai') {
+      url = 'https://api.openai.com/v1/chat/completions';
+      headers = { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' };
+      body = { /* ... */ };
+    } else if (model === 'gemini') {
+      url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key=${process.env.GEMINI_API_KEY}`;
+      headers = { 'Content-Type': 'application/json' };
+      body = {
+        contents: [{ parts: [{ text: `${systemContext}\n\n${prompt}` }] }],
+        // Fix: Gemini grounding is different – try removing or correcting
+        // grounding: { source: 'GOOGLE_SEARCH' }  ← this might be invalid
+        // Alternative: use tools array if supported
+      };
+    }
+
+    console.log(`[callAI] Sending to ${url}`);
+
+    const response = await axios.post(url, body, { headers });
+
+    console.log(`[callAI] Success for ${model} - status: ${response.status}`);
+
+    if (model === 'gemini') {
+      return response.data.candidates[0].content.parts[0].text;
+    } else {
+      return response.data.choices[0].message.content;
+    }
+  } catch (error) {
+    console.error(`[callAI] Error for ${model}:`);
+    console.error('Status:', error.response?.status);
+    console.error('Data:', error.response?.data);
+    console.error('Headers:', error.response?.headers);
+    console.error('Message:', error.message);
+    throw error; // rethrow so command catch block sees it
   }
+}
 
   const response = await axios.post(url, body, { headers });
   
@@ -85,7 +93,6 @@ async function callAI(model, prompt, systemContext = FRAMEWORK_CONTEXT) {
   } else {
     return response.data.choices[0].message.content;
   }
-}
 
 // Helper to show typing indicator every ~4 seconds (Telegram resets after ~5 s)
 async function showTyping(ctx, stopSignal = { stop: false }) {
