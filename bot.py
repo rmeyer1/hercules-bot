@@ -47,31 +47,47 @@ async def call_ai(model, prompt, system_context=FRAMEWORK_CONTEXT):
     print(f"[callAI] Starting call for model: {model}")
 
     if model == 'grok':
-        client = XAIClient(api_key=os.getenv('GROK_API_KEY'))
-        # Define tools using SDK (automatically gets schemas)
-        web_search = client.tools.web_search
-        code_execution = client.tools.code_execution
-        x_keyword_search = client.tools.x_keyword_search  # Matches your X search needs
+    from xai_sdk import Client
+    from xai_sdk.chat import user, system  # Not strictly needed but good for clarity
+    from xai_sdk.tools import web_search, code_execution, x_search  # ← Correct imports!
 
-        # Prepare messages (SDK uses 'input' as list of dicts)
-        input_messages = [
-            {"role": "system", "content": system_context or "You are a helpful trading assistant."},
-            {"role": "user", "content": prompt or "Provide a quick test response."}
-        ]
+    client = Client(api_key=os.getenv('GROK_API_KEY'))
 
-        # Create response with tools (server-side execution)
-        response = client.responses.create(
-            model="grok-4-1-fast",  # Or 'grok-4-1-fast' if available; check your access
-            input=input_messages,
-            tools=[web_search.schema, code_execution.schema, x_keyword_search.schema],
-            tool_choice="auto",
-            parallel_tool_calls=True,
-            store=False,
-            temperature=0.7,
-            max_tokens=1024
-        )
-        print(f"[callAI] Success - Grok response received")
-        return response.content  # SDK returns resolved content after tools
+    # Create chat session with server-side tools enabled
+    chat = client.chat.create(
+        model="grok-4-1-fast",  # Recommended for fast + tools; alt: "grok-4-1-fast-reasoning"
+        tools=[
+            web_search(),       # Enables web browsing & search
+            code_execution(),   # Enables Python REPL
+            x_search()          # Enables X/Twitter keyword/semantic/user/thread search
+        ],
+        tool_choice="auto",     # Model decides when to use tools
+        parallel_tool_calls=True,
+        store=False,            # Don't persist chat history server-side
+        temperature=0.7,
+        max_tokens=1024
+    )
+
+    # Add system prompt (as first message)
+    chat.append(system(system_context or "You are a helpful trading assistant."))
+
+    # Add user prompt
+    chat.append(user(prompt or "Provide a quick test response."))
+
+    # Get the final response (SDK handles all internal tool calls server-side)
+    # Use .sample() for non-streaming, or .stream() if you want real-time chunks later
+    full_content = ""
+    is_thinking = True
+    for resp_chunk, chunk in chat.stream():
+        if chunk.content:
+            if is_thinking:
+                print("\n\nThinking... (this may take a while for long responses)")
+                print("\n\nFinal Response:")
+                is_thinking = False
+        full_content += chunk.content
+        print(chunk.content, end="", flush=True)  # Could send partial updates to Telegram
+    
+    return full_content# This is the final resolved answer
 
     elif model == 'openai':
         url = 'https://api.openai.com/v1/chat/completions'
