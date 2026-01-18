@@ -50,6 +50,7 @@ async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTE
     if model == 'grok':
         try:
             from xai_sdk import Client
+            from xai_sdk.chat import user, system
             from xai_sdk.tools import web_search, code_execution, x_search
         except ImportError as e:
             raise ImportError("xai-sdk not installed or incompatible. Run: pip install xai-sdk --upgrade") from e
@@ -57,7 +58,7 @@ async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTE
         client = Client(api_key=os.getenv('GROK_API_KEY'))
 
         chat = client.chat.create(
-            model="grok-4-1-fast",  # Fast + tools; alternatives: "grok-beta", "grok-4-1-fast-reasoning"
+            model="grok-4-1-fast",  # Change to "grok-beta" if access issue
             tools=[
                 web_search(),
                 code_execution(),
@@ -67,16 +68,15 @@ async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTE
             parallel_tool_calls=True,
             temperature=0.7,
             max_tokens=1024
-            # NO 'store' parameter here – it's not supported / needed in current SDK
         )
 
-        # Add system prompt
-        chat.append({"role": "system", "content": system_context or "You are a helpful trading assistant."})
+        # Append system prompt using the correct helper
+        chat.append(system(system_context or "You are a helpful trading assistant."))
 
-        # Add user prompt
-        chat.append({"role": "user", "content": prompt or "Provide a quick test response."})
+        # Append user prompt using the correct helper
+        chat.append(user(prompt or "Provide a quick test response."))
 
-        # Get the final resolved response (SDK handles all server-side tool calls)
+        # Get the final resolved response (SDK handles server-side tools)
         response = chat.sample()
 
         print("[callAI] Success - Grok response received")
