@@ -4,11 +4,17 @@ import sys
 import asyncio
 import io
 from dotenv import load_dotenv
+
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, CallbackContext
+
 import requests
-from xai_sdk import Client as XAIClient  # For Grok with tools
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Grok / xAI SDK imports - moved inside the function to avoid import errors
+# if the package is missing or version is incompatible
+# ──────────────────────────────────────────────────────────────────────────────
 
 load_dotenv()
 
@@ -23,7 +29,7 @@ print('Current directory:', os.getcwd())
 # Store user model preferences (per chat ID)
 user_models = {}  # Default to 'grok'
 
-# Framework context (condensed from your docs)
+# Framework context (same as before)
 FRAMEWORK_CONTEXT = """
 Framework: 'Be the Casino' Options Trading Mindset
 - Core Mindset: Be the casino (option seller), not the gambler (buyer). Sellers collect premiums upfront for obligation, with statistical edge. Buyers pay for rights but need direction, magnitude, timing right. Quote: "Do you think they built the ARIA so beautiful because people go there and win a bunch of money? No, it's built on losers." – TJ. Focus on process, embrace being wrong, accumulate small wins.
@@ -43,55 +49,53 @@ Management:
 General: Enter high IV expected to fall. Positive theta, negative vega. Defined risks. Tie recommendations to this.
 """
 
-async def call_ai(model, prompt, system_context=FRAMEWORK_CONTEXT):
+async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTEXT) -> str:
     print(f"[callAI] Starting call for model: {model}")
 
     if model == 'grok':
-    from xai_sdk import Client
-    from xai_sdk.chat import user, system  # Not strictly needed but good for clarity
-    from xai_sdk.tools import web_search, code_execution, x_search  # ← Correct imports!
+        try:
+            from xai_sdk import Client
+            from xai_sdk.tools import web_search, code_execution, x_search
+        except ImportError as e:
+            raise ImportError("xai-sdk not installed or incompatible. Run: pip install xai-sdk --upgrade") from e
 
-    client = Client(api_key=os.getenv('GROK_API_KEY'))
+        client = Client(api_key=os.getenv('GROK_API_KEY'))
 
-    # Create chat session with server-side tools enabled
-    chat = client.chat.create(
-        model="grok-4-1-fast",  # Recommended for fast + tools; alt: "grok-4-1-fast-reasoning"
-        tools=[
-            web_search(),       # Enables web browsing & search
-            code_execution(),   # Enables Python REPL
-            x_search()          # Enables X/Twitter keyword/semantic/user/thread search
-        ],
-        tool_choice="auto",     # Model decides when to use tools
-        parallel_tool_calls=True,
-        store=False,            # Don't persist chat history server-side
-        temperature=0.7,
-        max_tokens=1024
-    )
+        chat = client.chat.create(
+            model="grok-4-1-fast",  # or "grok-beta" / "grok-4-1-fast-reasoning" depending on your access
+            tools=[
+                web_search(),
+                code_execution(),
+                x_search()
+            ],
+            tool_choice="auto",
+            parallel_tool_calls=True,
+            store=False,
+            temperature=0.7,
+            max_tokens=1024
+        )
 
-    # Add system prompt (as first message)
-    chat.append(system(system_context or "You are a helpful trading assistant."))
+        # System prompt first
+        chat.append({"role": "system", "content": system_context or "You are a helpful trading assistant."})
 
-    # Add user prompt
-    chat.append(user(prompt or "Provide a quick test response."))
+        # User prompt
+        chat.append({"role": "user", "content": prompt or "Provide a quick test response."})
 
-    # Get the final response (SDK handles all internal tool calls server-side)
-    # Use .sample() for non-streaming, or .stream() if you want real-time chunks later
-    full_content = ""
-    is_thinking = True
-    for resp_chunk, chunk in chat.stream():
-        if chunk.content:
-            if is_thinking:
-                print("\n\nThinking... (this may take a while for long responses)")
-                print("\n\nFinal Response:")
-                is_thinking = False
-        full_content += chunk.content
-        print(chunk.content, end="", flush=True)  # Could send partial updates to Telegram
-    
-    return full_content# This is the final resolved answer
+        # Get complete response (server handles all tool calls)
+        response = chat.sample()
+
+        print("[callAI] Success - Grok response received")
+        print("Tool usage:", response.server_side_tool_usage)
+        print("Citations:", response.citations)
+
+        return response.content
 
     elif model == 'openai':
         url = 'https://api.openai.com/v1/chat/completions'
-        headers = {'Authorization': f"Bearer {os.getenv('OPENAI_API_KEY')}", 'Content-Type': 'application/json'}
+        headers = {
+            'Authorization': f"Bearer {os.getenv('OPENAI_API_KEY')}",
+            'Content-Type': 'application/json'
+        }
         body = {
             "model": "gpt-4o-search-preview",
             "messages": [
@@ -101,8 +105,6 @@ async def call_ai(model, prompt, system_context=FRAMEWORK_CONTEXT):
             "temperature": 0.7,
             "max_tokens": 1024
         }
-        print(f"[callAI] Sending request to {url}")
-        print(f"[callAI] Request body: {body}")
         resp = requests.post(url, headers=headers, json=body)
         resp.raise_for_status()
         return resp.json()['choices'][0]['message']['content']
@@ -114,19 +116,20 @@ async def call_ai(model, prompt, system_context=FRAMEWORK_CONTEXT):
             "contents": [{"parts": [{"text": f"{system_context}\n\n{prompt}"}]}],
             "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1024}
         }
-        print(f"[callAI] Sending request to {url}")
-        print(f"[callAI] Request body: {body}")
         resp = requests.post(url, headers=headers, json=body)
         resp.raise_for_status()
         return resp.json()['candidates'][0]['content']['parts'][0]['text']
 
     else:
-        raise ValueError('Invalid model selected')
+        raise ValueError(f"Unsupported model: {model}")
 
 async def show_typing(context: CallbackContext, chat_id: int):
     while True:
-        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-        await asyncio.sleep(4)
+        try:
+            await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+            await asyncio.sleep(4)
+        except Exception:
+            break
 
 async def send_response(update: Update, result: str):
     if len(result) > 4000:
@@ -139,24 +142,32 @@ async def send_response(update: Update, result: str):
 async def setmodel(update: Update, context: CallbackContext):
     args = context.args
     if not args:
-        await update.message.reply_text('Invalid model. Use /setmodel grok, openai, or gemini.')
+        await update.message.reply_text('Usage: /setmodel grok | openai | gemini')
         return
     new_model = args[0].lower()
     if new_model in ['grok', 'openai', 'gemini']:
-        user_models[update.message.chat_id] = new_model
-        await update.message.reply_text(f"Model set to {new_model}. Web search enabled where supported.")
+        user_models[update.effective_chat.id] = new_model
+        await update.message.reply_text(f"Model set to **{new_model}**.")
     else:
-        await update.message.reply_text('Invalid model. Use /setmodel grok, openai, or gemini.')
+        await update.message.reply_text('Invalid model. Choose: grok, openai, gemini')
 
 async def scan(update: Update, context: CallbackContext):
-    model = user_models.get(update.message.chat_id, 'grok')
+    model = user_models.get(update.effective_chat.id, 'grok')
     args = context.args
     strategy = args[0] if args else 'bull_put_spread'
     tickers = ' '.join(args[1:]) if len(args) > 1 else 'SOFI PLTR HOOD'
 
-    typing_task = asyncio.create_task(show_typing(context, update.message.chat_id))
-    prompt = f"Run scan for {strategy} opportunities on {tickers}. Use web search or tools for real-time options data.\nCriteria: 30-45 DTE, OTM short strike, net credit >$0.50, annualized ROC >6%, positive theta, negative vega.\nInclude max profit/loss, breakeven, risk notes. Output as markdown table. Incorporate X/web sentiment."
-    
+    typing_task = asyncio.create_task(show_typing(context, update.effective_chat.id))
+
+    prompt = (
+        f"Run scan for {strategy} opportunities on {tickers}. "
+        "Use web/X search tools for real-time options data and sentiment. "
+        "Criteria: 30-45 DTE, OTM short strike, net credit >$0.50, "
+        "annualized ROC >6%, positive theta, negative vega. "
+        "Include max profit/loss, breakeven, risk notes. "
+        "Output as markdown table. Incorporate current X/web sentiment."
+    )
+
     try:
         result = await call_ai(model, prompt)
         await send_response(update, result)
@@ -166,12 +177,19 @@ async def scan(update: Update, context: CallbackContext):
         typing_task.cancel()
 
 async def manage(update: Update, context: CallbackContext):
-    model = user_models.get(update.message.chat_id, 'grok')
-    position = ' '.join(context.args) if context.args else 'CSP on SOFI at $8 strike, net credit $0.67'
+    model = user_models.get(update.effective_chat.id, 'grok')
+    position = ' '.join(context.args) or 'CSP on SOFI at $8 strike, net credit $0.67'
 
-    typing_task = asyncio.create_task(show_typing(context, update.message.chat_id))
-    prompt = f"Manage position: {position}. Use web search for current market data.\nRecommend: close (if >50% profit), roll (if needed), or hold.\nCalculate updated P/L, breakeven, risks. Tie to 'be the casino' mindset."
-    
+    typing_task = asyncio.create_task(show_typing(context, update.effective_chat.id))
+
+    prompt = (
+        f"Manage position: {position}. "
+        "Use current market data from web search. "
+        "Recommend: close (if >50% profit), roll (if needed), or hold. "
+        "Calculate updated P/L, breakeven, risks. "
+        "Tie to 'be the casino' mindset."
+    )
+
     try:
         result = await call_ai(model, prompt)
         await send_response(update, result)
@@ -181,12 +199,20 @@ async def manage(update: Update, context: CallbackContext):
         typing_task.cancel()
 
 async def sentiment(update: Update, context: CallbackContext):
-    model = user_models.get(update.message.chat_id, 'grok')
-    sector = ' '.join(context.args) if context.args else 'tech stocks'
+    model = user_models.get(update.effective_chat.id, 'grok')
+    sector = ' '.join(context.args) or 'tech stocks'
 
-    typing_task = asyncio.create_task(show_typing(context, update.message.chat_id))
-    prompt = f"Analyze market sentiment on X/web for '{sector}' (e.g., tech, value, high beta stocks).\nUse web/X search tools to fetch recent posts/data (last 7 days, from finance sources).\nClassify as bullish/neutral/bearish (with % breakdown), summarize key themes.\nRelate to options strategies: e.g., bullish = good for put credit spreads.\nRepresent diverse viewpoints."
-    
+    typing_task = asyncio.create_task(show_typing(context, update.effective_chat.id))
+
+    prompt = (
+        f"Analyze market sentiment on X/web for '{sector}' "
+        "(e.g., tech, value, high beta stocks). "
+        "Use web/X search tools to fetch recent posts/data (last 7 days, finance sources). "
+        "Classify as bullish/neutral/bearish (with % breakdown), summarize key themes. "
+        "Relate to options strategies: e.g., bullish = good for put credit spreads. "
+        "Represent diverse viewpoints."
+    )
+
     try:
         result = await call_ai(model, prompt)
         await send_response(update, result)
@@ -196,25 +222,35 @@ async def sentiment(update: Update, context: CallbackContext):
         typing_task.cancel()
 
 async def start(update: Update, context: CallbackContext):
-    await update.message.reply_text('Welcome to HerculesTradingBot! Commands: /scan, /manage, /sentiment, /setmodel [grok|openai|gemini]. Default model: grok. Web search integrated!')
+    await update.message.reply_text(
+        "Welcome to **HerculesTradingBot**! 🚀\n\n"
+        "Commands:\n"
+        "• /setmodel grok | openai | gemini\n"
+        "• /scan [strategy] [tickers...]\n"
+        "• /manage [position description]\n"
+        "• /sentiment [sector]\n\n"
+        "Default model: grok (with real-time web/X tools)"
+    )
 
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('setmodel', setmodel))
-    application.add_handler(CommandHandler('scan', scan))
-    application.add_handler(CommandHandler('manage', manage))
-    application.add_handler(CommandHandler('sentiment', sentiment))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("setmodel", setmodel))
+    application.add_handler(CommandHandler("scan", scan))
+    application.add_handler(CommandHandler("manage", manage))
+    application.add_handler(CommandHandler("sentiment", sentiment))
 
-    # Graceful stop
-    def stop(signal, frame):
-        print("Stopping bot...")
+    # Graceful shutdown
+    def stop(sig, frame):
+        print("\nShutting down bot...")
         sys.exit(0)
+
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
 
-    application.run_polling()
+    print("Bot is running...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
