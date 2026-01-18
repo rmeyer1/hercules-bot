@@ -47,67 +47,58 @@ async function callAI(model, prompt, systemContext = FRAMEWORK_CONTEXT) {
 
   try {
     if (model === 'grok') {
-      url = 'https://api.x.ai/v1/responses';  // Updated to new Responses API endpoint
+      url = 'https://api.x.ai/v1/responses';  // Responses endpoint for tool support
       headers = { Authorization: `Bearer ${process.env.GROK_API_KEY}`, 'Content-Type': 'application/json' };
       body = {
-        model: 'grok-4-1-fast-reasoning',  // Keep your model; consider updating to 'grok-4' if available in your account
-        input: [  // Renamed from 'messages' to 'input' (array of message objects)
+        model: 'grok-4-1-fast',  // Valid model from docs (remove '-reasoning' suffix if used)
+        input: [  // Use 'input' for messages array
           { role: 'system', content: systemContext || 'You are a helpful trading assistant.' },
           { role: 'user', content: prompt || 'Provide a quick test response.' }
         ],
-        tools: [  // Full JSON Schema definitions for tools (enables server-side execution)
+        tools: [  // Flattened structure without type:function wrapper, as per common API variations and error analysis
           {
-            "type": "function",
-            "function": {
-              "name": "web_search",
-              "description": "This action allows you to search the web. You can use search operators like site:reddit.com when needed.",
-              "parameters": {
-                "type": "object",
-                "properties": {
-                  "query": { "type": "string", "description": "The search query to look up on the web." },
-                  "num_results": { "type": "integer", "description": "The number of results to return. Optional, default 10, max 30." }
-                },
-                "required": ["query"]
-              }
+            "name": "web_search",
+            "description": "This action allows you to search the web. You can use search operators like site:reddit.com when needed.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "query": { "type": "string", "description": "The search query to look up on the web." },
+                "num_results": { "type": "integer", "description": "The number of results to return. Optional, default 10, max 30." }
+              },
+              "required": ["query"]
             }
           },
           {
-            "type": "function",
-            "function": {
-              "name": "code_execution",
-              "description": "Execute Python code in a stateful REPL environment for calculations, data analysis, etc. Supports libraries like numpy, sympy, etc.",
-              "parameters": {
-                "type": "object",
-                "properties": {
-                  "code": { "type": "string", "description": "The code to be executed." }
-                },
-                "required": ["code"]
-              }
+            "name": "code_execution",
+            "description": "Execute Python code in a stateful REPL environment for calculations, data analysis, etc. Supports libraries like numpy, sympy, etc.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "code": { "type": "string", "description": "The code to be executed." }
+              },
+              "required": ["code"]
             }
           },
           {
-            "type": "function",
-            "function": {
-              "name": "x_keyword_search",
-              "description": "Advanced search tool for X Posts using keywords, operators, filters, etc.",
-              "parameters": {
-                "type": "object",
-                "properties": {
-                  "query": { "type": "string", "description": "The search query string for X advanced search. Supports operators like OR, from:user, etc." },
-                  "limit": { "type": "integer", "description": "The number of posts to return. Optional, default 10." },
-                  "mode": { "type": "string", "enum": ["Top", "Latest"], "description": "Sort by Top or Latest. Default: Top." }
-                },
-                "required": ["query"]
-              }
+            "name": "x_search",
+            "description": "Advanced search tool for X Posts using keywords, operators, filters, etc.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "query": { "type": "string", "description": "The search query string for X advanced search. Supports operators like OR, from:user, etc." },
+                "limit": { "type": "integer", "description": "The number of posts to return. Optional, default 10." },
+                "mode": { "type": "string", "enum": ["Top", "Latest"], "description": "Sort by Top or Latest. Default: Top." }
+              },
+              "required": ["query"]
             }
           }
           // Add more tools if needed, e.g., x_semantic_search with similar schema
         ],
         tool_choice: 'auto',  // Let the model decide when to use tools
         parallel_tool_calls: true,  // Allow multiple tool calls in parallel
-        store: false,  // Optional: Don't store responses server-side (saves costs/privacy)
+        store: false,  // Optional: Don't store responses server-side
         temperature: 0.7,
-        max_tokens: 1024  // Controls output length; supported per docs
+        max_tokens: 1024
       };
     } else if (model === 'openai') {
       url = 'https://api.openai.com/v1/chat/completions';
@@ -150,9 +141,8 @@ async function callAI(model, prompt, systemContext = FRAMEWORK_CONTEXT) {
     if (model === 'gemini') {
       return response.data.candidates[0].content.parts[0].text;
     } else {
-      // Updated parsing: New API may return slightly different structure; adjust if needed (e.g., response.data.content)
-      // Assuming OpenAI-like for now; check actual response in logs if issues
-      return response.data.content || response.data.choices?.[0]?.message?.content;
+      // Parsing for xAI: Use response.data.response.content for /v1/responses
+      return response.data.response?.content || response.data.choices?.[0]?.message?.content;
     }
   } catch (error) {
     console.error(`[callAI] Error for model ${model}:`);
