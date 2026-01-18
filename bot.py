@@ -11,11 +11,6 @@ from telegram.ext import Application, CommandHandler, CallbackContext
 
 import requests
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Grok / xAI SDK imports - moved inside the function to avoid import errors
-# if the package is missing or version is incompatible
-# ──────────────────────────────────────────────────────────────────────────────
-
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -62,7 +57,7 @@ async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTE
         client = Client(api_key=os.getenv('GROK_API_KEY'))
 
         chat = client.chat.create(
-            model="grok-4-1-fast",  # or "grok-beta" / "grok-4-1-fast-reasoning" depending on your access
+            model="grok-4-1-fast",  # Fast + tools; alternatives: "grok-beta", "grok-4-1-fast-reasoning"
             tools=[
                 web_search(),
                 code_execution(),
@@ -70,23 +65,23 @@ async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTE
             ],
             tool_choice="auto",
             parallel_tool_calls=True,
-            store=False,
             temperature=0.7,
             max_tokens=1024
+            # NO 'store' parameter here – it's not supported / needed in current SDK
         )
 
-        # System prompt first
+        # Add system prompt
         chat.append({"role": "system", "content": system_context or "You are a helpful trading assistant."})
 
-        # User prompt
+        # Add user prompt
         chat.append({"role": "user", "content": prompt or "Provide a quick test response."})
 
-        # Get complete response (server handles all tool calls)
+        # Get the final resolved response (SDK handles all server-side tool calls)
         response = chat.sample()
 
         print("[callAI] Success - Grok response received")
-        print("Tool usage:", response.server_side_tool_usage)
-        print("Citations:", response.citations)
+        print("Tool usage:", getattr(response, 'server_side_tool_usage', 'N/A'))
+        print("Citations:", getattr(response, 'citations', 'None'))
 
         return response.content
 
