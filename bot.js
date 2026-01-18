@@ -3,10 +3,12 @@
 // Setup: Create .env with TELEGRAM_TOKEN, GROK_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY
 // Run: node bot.js
 
-require('dotenv').config();
-const { Telegraf } = require('telegraf');
-const axios = require('axios');
-const { Buffer } = require('buffer'); // For sending text as file
+import { Telegraf } from 'telegraf';
+import axios from 'axios';
+import dotenv from 'dotenv';
+import { Buffer } from 'buffer';
+
+dotenv.config();
 
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
 
