@@ -3,12 +3,10 @@
 // Setup: Create .env with TELEGRAM_TOKEN, GROK_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY
 // Run: node bot.js
 
-import { Telegraf } from 'telegraf';
-import axios from 'axios';
-import dotenv from 'dotenv';
-import { Buffer } from 'buffer';
-
-dotenv.config();
+require('dotenv').config();
+const { Telegraf } = require('telegraf');
+const axios = require('axios');
+const { Buffer } = require('buffer');
 
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
 
@@ -49,27 +47,53 @@ async function callAI(model, prompt, systemContext = FRAMEWORK_CONTEXT) {
     if (model === 'grok') {
       url = 'https://api.x.ai/v1/chat/completions';
       headers = { Authorization: `Bearer ${process.env.GROK_API_KEY}`, 'Content-Type': 'application/json' };
-      body = { /* ... */ };
+      body = {
+        model: 'grok-beta',  // Updated to a known/working model name (change if you have a specific one)
+        messages: [
+          { role: 'system', content: systemContext || 'You are a helpful trading assistant.' },
+          { role: 'user', content: prompt || 'Provide a quick test response.' }
+        ],
+        tools: [{ type: 'x_search' }, { type: 'code_execution' }, { type: 'web_search' }],
+        temperature: 0.7,
+        max_tokens: 1024
+      };
     } else if (model === 'openai') {
       url = 'https://api.openai.com/v1/chat/completions';
       headers = { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' };
-      body = { /* ... */ };
+      body = {
+        model: 'gpt-4o-search-preview',
+        messages: [
+          { role: 'system', content: systemContext },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.7,
+        max_tokens: 1024
+      };
     } else if (model === 'gemini') {
       url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key=${process.env.GEMINI_API_KEY}`;
       headers = { 'Content-Type': 'application/json' };
       body = {
-        contents: [{ parts: [{ text: `${systemContext}\n\n${prompt}` }] }],
-        // Fix: Gemini grounding is different – try removing or correcting
-        // grounding: { source: 'GOOGLE_SEARCH' }  ← this might be invalid
-        // Alternative: use tools array if supported
+        contents: [
+          {
+            parts: [{ text: `${systemContext}\n\n${prompt}` }]
+          }
+        ],
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 1024
+        }
+        // Note: Grounding/search not added yet – can be implemented later with tools array
       };
+    } else {
+      throw new Error('Invalid model selected');
     }
 
-    console.log(`[callAI] Sending to ${url}`);
+    console.log(`[callAI] Sending request to ${url}`);
+    console.log('[callAI] Request body:', JSON.stringify(body, null, 2));
 
     const response = await axios.post(url, body, { headers });
 
-    console.log(`[callAI] Success for ${model} - status: ${response.status}`);
+    console.log(`[callAI] Success - status: ${response.status}`);
 
     if (model === 'gemini') {
       return response.data.candidates[0].content.parts[0].text;
@@ -77,16 +101,15 @@ async function callAI(model, prompt, systemContext = FRAMEWORK_CONTEXT) {
       return response.data.choices[0].message.content;
     }
   } catch (error) {
-    console.error(`[callAI] Error for ${model}:`);
+    console.error(`[callAI] Error for model ${model}:`);
     console.error('Status:', error.response?.status);
-    console.error('Data:', error.response?.data);
-    console.error('Headers:', error.response?.headers);
+    console.error('Data:', JSON.stringify(error.response?.data, null, 2));
     console.error('Message:', error.message);
-    throw error; // rethrow so command catch block sees it
+    throw error;
   }
 }
 
-// Helper to show typing indicator every ~4 seconds (Telegram resets after ~5 s)
+// Helper to show typing indicator every ~4 seconds
 async function showTyping(ctx, stopSignal = { stop: false }) {
   const chatId = ctx.chat.id;
 
@@ -98,9 +121,9 @@ async function showTyping(ctx, stopSignal = { stop: false }) {
     try {
       await ctx.telegram.sendChatAction(chatId, 'typing');
     } catch (err) {
-      // ignore errors (user might have blocked bot, left chat, etc.)
+      // ignore
     }
-  }, 4000); // Telegram timeout is ~5 seconds
+  }, 4000);
 
   return () => {
     stopSignal.stop = true;
@@ -108,13 +131,12 @@ async function showTyping(ctx, stopSignal = { stop: false }) {
   };
 }
 
-// Helper to send response (as markdown or file if too long)
+// Helper to send response (markdown or file if too long)
 async function sendResponse(ctx, result, stopTyping) {
   stopTyping();
-  if (result.length > 4000) { // Telegram max message length ~4096
-    // Send as .txt file
+  if (result.length > 4000) {
     const buffer = Buffer.from(result, 'utf-8');
-    await ctx.replyWithDocument({ source: buffer, filename: 'response.txt' }, { caption: 'Response is long—sent as file for better reading.' });
+    await ctx.replyWithDocument({ source: buffer, filename: 'response.txt' }, { caption: 'Response is long — sent as file.' });
   } else {
     await ctx.replyWithMarkdown(result);
   }
@@ -139,13 +161,12 @@ bot.command('scan', async (ctx) => {
   const strategy = args[0] || 'bull_put_spread';
   const tickers = args.slice(1).join(' ') || 'SOFI PLTR HOOD';
 
-  // Show typing indicator immediately
   const stopTyping = await showTyping(ctx);
 
-  let prompt = `Run scan for ${strategy} opportunities on ${tickers}. Use web search or tools for real-time options data.
+  const prompt = `Run scan for ${strategy} opportunities on ${tickers}. Use web search or tools for real-time options data.
 Criteria: 30-45 DTE, OTM short strike, net credit >$0.50, annualized ROC >6%, positive theta, negative vega.
 Include max profit/loss, breakeven, risk notes. Output as markdown table. Incorporate X/web sentiment.`;
-  
+
   try {
     const result = await callAI(model, prompt);
     await sendResponse(ctx, result, stopTyping);
@@ -160,13 +181,12 @@ bot.command('manage', async (ctx) => {
   const model = userModels.get(ctx.chat.id) || 'grok';
   const position = ctx.message.text.split(' ').slice(1).join(' ') || 'CSP on SOFI at $8 strike, net credit $0.67';
 
-  // Show typing indicator immediately
   const stopTyping = await showTyping(ctx);
 
-  let prompt = `Manage position: ${position}. Use web search for current market data.
+  const prompt = `Manage position: ${position}. Use web search for current market data.
 Recommend: close (if >50% profit), roll (if needed), or hold.
 Calculate updated P/L, breakeven, risks. Tie to 'be the casino' mindset.`;
-  
+
   try {
     const result = await callAI(model, prompt);
     await sendResponse(ctx, result, stopTyping);
@@ -181,15 +201,14 @@ bot.command('sentiment', async (ctx) => {
   const model = userModels.get(ctx.chat.id) || 'grok';
   const sector = ctx.message.text.split(' ').slice(1).join(' ') || 'tech stocks';
 
-  // Show typing indicator immediately
   const stopTyping = await showTyping(ctx);
 
-  let prompt = `Analyze market sentiment on X/web for '${sector}' (e.g., tech, value, high beta stocks).
+  const prompt = `Analyze market sentiment on X/web for '${sector}' (e.g., tech, value, high beta stocks).
 Use web/X search tools to fetch recent posts/data (last 7 days, from finance sources).
 Classify as bullish/neutral/bearish (with % breakdown), summarize key themes.
 Relate to options strategies: e.g., bullish = good for put credit spreads.
 Represent diverse viewpoints.`;
-  
+
   try {
     const result = await callAI(model, prompt);
     await sendResponse(ctx, result, stopTyping);
@@ -199,14 +218,14 @@ Represent diverse viewpoints.`;
   }
 });
 
-// Start command for welcome
+// Start command
 bot.start((ctx) => {
-  ctx.reply('Welcome to OptionsCasinoBot! Commands: /scan, /manage, /sentiment, /setmodel [grok|openai|gemini]. Default model: grok. Web search integrated!');
+  ctx.reply('Welcome to HerculesTradingBot! Commands: /scan, /manage, /sentiment, /setmodel [grok|openai|gemini]. Default model: grok. Web search integrated!');
 });
 
 bot.launch();
 console.log('Bot is running...');
 
-// Handle graceful stop
+// Graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
