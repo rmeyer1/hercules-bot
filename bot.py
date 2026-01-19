@@ -2,6 +2,7 @@ import os
 import signal
 import sys
 import asyncio
+import io
 import sqlite3
 import yfinance as yf
 from datetime import datetime
@@ -19,7 +20,7 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN not set in .env")
 
-# --- DATABASE SETUP ---
+# --- DATABASE SETUP (The "Business Ledger") ---
 def init_db():
     conn = sqlite3.connect('trades.db')
     c = conn.cursor()
@@ -37,44 +38,59 @@ def init_db():
 init_db()
 
 # --- DYNAMIC MODEL TRACKING ---
-user_models = {} 
+user_models = {} # Default to grok in handlers
 
-# --- UPDATED FRAMEWORK CONTEXT (The Four Core Trades) ---
+# --- UPDATED FRAMEWORK CONTEXT (The Grandmaster's Wisdom) ---
 FRAMEWORK_CONTEXT = """
-You are the 'Grandmaster' Trading Assistant. Core Philosophy: 'Be the Casino, Not the Gambler.'
-- Mindset: Sellers collect premiums upfront for an obligation with a statistical edge. 
-- Analogy: A trade is a 'fence' for a 'dog' (the stock). We only care that the boundary isn't crossed.
+You are the 'Grandmaster' Trading Assistant. Your core philosophy is 'Be the Casino, Not the Gambler.'
+- Mindset: Sellers collect premiums upfront for an obligation with a statistical edge.
+- Wisdom: "Do you think they built the ARIA so beautiful because people win? No, it's built on losers." - TJ.
+- Analogy: A credit spread is a 'fence' for a 'dog' (the stock). We only care that the boundary isn't crossed.
 
 The Four Core Trades:
-1. Cash-Secured Puts (CSP): "Getting paid to agree to buy the dip." Selling a put with cash collateral. 
-2. Covered Calls (CC): "Manufacturing a dividend" or "collecting rent" on 100+ owned shares.
-3. Bull Put Spreads: Selling a higher-strike put and buying a lower-strike put. Bullish/Neutral.
-4. Call Credit Spreads: Selling a lower-strike call and buying a higher-strike call. Bearish/Neutral.
+1. Cash-Secured Puts (CSP): Getting paid to agree to buy the dip.
+2. Covered Calls (CC): Collecting 'rent' on 100+ owned shares.
+3. Bull Put Spreads: Selling a higher-strike put, buying a lower-strike put (Bullish/Neutral).
+4. Call Credit Spreads: Selling a lower-strike call, buying a higher-strike call (Bearish/Neutral).
 
 Criteria:
-- IV Rank: Favor IV > 50th percentile for richer premiums.
-- Timeframe: Target 30-45 DTE for optimal Theta decay.
+- IV Rank: Favor IV > 50th percentile.
+- Timeframe: Target 30-45 DTE for Theta decay.
 - Risk: NEVER hold through earnings. Monitor dividends for Call-based trades.
-- Management: 'The gold is in managing the position.' Close at 50-60% profit. Roll only for a Net Credit.
+- Management: Close at 50-60% profit. Roll only for a Net Credit.
+"""
+
+HELP_TEXT = """
+🎰 *Hercules "Be the Casino" Tutorial* 🎰
+
+/start - Re-introduces the bot and displays the main command menu.
+/setmodel [model] - Toggle between Grok (best for X-search), OpenAI, and Gemini.
+/scan [ticker] - Analyzes for CSP, CC, BPS, and CCS based on IV and technicals.
+/sentiment [sector] - Scans X/Web to suggest the best "Casino" move for a sector.
+/manage [ticker] - Checks your trades for 50-60% profit targets or Roll advice.
+/open [ticker] [type] [strike] [premium] - Logs your trade into the ledger.
+
+*Remember: The gold is in managing the position.*
 """
 
 # --- MARKET DATA HELPERS ---
 def get_market_data(ticker_symbol):
+    """Fetches real-time facts to anchor the AI."""
     try:
         ticker = yf.Ticker(ticker_symbol)
         info = ticker.info
         calendar = ticker.calendar
         next_earnings = "Unknown"
         if calendar is not None and not calendar.empty:
-            next_earnings = calendar.iloc[0, 0].strftime('%Y-%m-%d') if hasattr(calendar, 'iloc') else "N/A"
+            next_earnings = calendar.iloc[0, 0].strftime('%Y-%m-%d') if hasattr(calendar, 'iloc') else "Check Broker"
 
         return {
             "price": info.get("regularMarketPrice") or info.get("currentPrice"),
             "earnings": next_earnings,
-            "iv_rank": info.get("beta") # Approximation
+            "iv_hint": info.get("beta") # Beta as proxy for free-tier volatility
         }
     except Exception:
-        return {"price": "N/A", "earnings": "Check Broker", "iv_rank": "N/A"}
+        return {"price": "Error", "earnings": "Check Broker", "iv_hint": "N/A"}
 
 # --- AI ROUTING LOGIC ---
 async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTEXT) -> str:
@@ -83,7 +99,7 @@ async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTE
         from xai_sdk.chat import user, system
         from xai_sdk.tools import web_search, code_execution, x_search
         client = Client(api_key=os.getenv('GROK_API_KEY'))
-        chat = client.chat.create(model="grok-2-latest", tools=[web_search(), code_execution(), x_search()])
+        chat = client.chat.create(model="grok-4-1-fast", tools=[web_search(), code_execution(), x_search()])
         chat.append(system(system_context))
         chat.append(user(prompt))
         return chat.sample().content
@@ -99,6 +115,9 @@ async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTE
 
 # --- COMMAND HANDLERS ---
 
+async def start(update: Update, context: CallbackContext):
+    await update.message.reply_markdown(f"Welcome to **HerculesTradingBot**! 🚀\n\n{HELP_TEXT}")
+
 async def setmodel(update: Update, context: CallbackContext):
     if not context.args: return await update.message.reply_text('Usage: /setmodel [grok|openai|gemini]')
     model = context.args[0].lower()
@@ -113,20 +132,18 @@ async def scan(update: Update, context: CallbackContext):
     
     prompt = (
         f"Analyze {ticker_sym} at ${data['price']}. Next Earnings: {data['earnings']}. "
-        f"Identify if this ticker is a candidate for: 1. CSP (buy the dip), 2. CC (rent generation), "
-        f"3. Bull Put Spread (high IV bull), or 4. Call Credit Spread (high IV bear). "
-        f"Recommend the BEST strategy based on current IV and technicals."
+        f"Identify if this ticker is a candidate for: 1. CSP, 2. CC, 3. Bull Put Spread, or 4. Call Credit Spread. "
+        f"Recommend the BEST strategy based on 'Be the Casino' rules."
     )
-    
     await handle_ai_request(update, context, model, prompt)
 
 async def sentiment(update: Update, context: CallbackContext):
     model = user_models.get(update.effective_chat.id, 'grok')
     sector = ' '.join(context.args) or 'tech stocks'
     prompt = (
-        f"Fetch sentiment for {sector}. How does this outlook impact our 4 core trades: "
-        f"Cash-Secured Puts, Covered Calls, Bull Put Spreads, and Call Credit Spreads? "
-        f"Which strategy is the most 'Casino' move right now?"
+        f"Analyze sentiment for {sector}. How does this impact our 4 core trades: "
+        f"CSP, CC, Bull Put Spreads, and Call Credit Spreads? "
+        f"Which is the best 'Casino' move right now?."
     )
     await handle_ai_request(update, context, model, prompt)
 
@@ -136,12 +153,15 @@ async def manage(update: Update, context: CallbackContext):
     if not ticker: return await update.message.reply_text("Usage: /manage [ticker]")
     
     conn = sqlite3.connect('trades.db'); c = conn.cursor()
-    c.execute("SELECT entry_price, type FROM trades WHERE ticker=? ORDER BY id DESC LIMIT 1", (ticker,))
+    c.execute("SELECT entry_price, type FROM trades WHERE ticker=? AND chat_id=? ORDER BY id DESC LIMIT 1", (ticker, update.effective_chat.id))
     row = c.fetchone(); conn.close()
     
     market = get_market_data(ticker)
-    entry_info = f"Entry: ${row[0]} ({row[1]})" if row else "No entry data."
-    prompt = f"Manage {ticker}. {entry_info}. Market Price: ${market['price']}. Apply the 50% profit and Net Credit Roll rules."
+    entry_info = f"Entry: ${row[0]} ({row[1]})" if row else "No entry data in ledger."
+    prompt = (
+        f"Manage {ticker}. {entry_info}. Market Price: ${market['price']}. "
+        f"Check the 50% profit target and provide Net Credit Roll advice."
+    )
     await handle_ai_request(update, context, model, prompt)
 
 async def open_trade(update: Update, context: CallbackContext):
@@ -151,22 +171,30 @@ async def open_trade(update: Update, context: CallbackContext):
         c.execute("INSERT INTO trades (chat_id, ticker, type, strike, entry_price, date) VALUES (?, ?, ?, ?, ?, ?)",
                   (update.effective_chat.id, ticker.upper(), t_type.upper(), strike, premium, datetime.now().strftime('%Y-%m-%d')))
         conn.commit(); conn.close()
-        await update.message.reply_text(f"Logged {ticker} {t_type} at ${premium}.")
-    except: await update.message.reply_text("Usage: /open [ticker] [type:CSP/CC/BPS/CCS] [strike] [premium]")
+        await update.message.reply_text(f"📈 Logged {ticker} {t_type} at ${premium}. Business is open.")
+    except: await update.message.reply_text("Usage: /open [ticker] [CSP/CC/BPS/CCS] [strike] [premium]")
 
 async def handle_ai_request(update, context, model, prompt):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
     try:
         result = await call_ai(model, prompt)
-        await update.message.reply_markdown(result)
+        if len(result) > 4000:
+            buffer = io.BytesIO(result.encode('utf-8')); buffer.name = 'response.txt'
+            await update.message.reply_document(document=buffer, caption='Response is long — sent as file.')
+        else: await update.message.reply_markdown(result)
     except Exception as e: await update.message.reply_text(f"Error: {str(e)}")
 
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
-    for cmd in [("start", lambda u, c: u.message.reply_text("Hercules Ready.")), 
-                ("setmodel", setmodel), ("scan", scan), ("sentiment", sentiment), 
-                ("manage", manage), ("open", open_trade)]:
-        application.add_handler(CommandHandler(cmd[0], cmd[1]))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", lambda u, c: u.message.reply_markdown(HELP_TEXT)))
+    application.add_handler(CommandHandler("setmodel", setmodel))
+    application.add_handler(CommandHandler("scan", scan))
+    application.add_handler(CommandHandler("sentiment", sentiment))
+    application.add_handler(CommandHandler("manage", manage))
+    application.add_handler(CommandHandler("open", open_trade))
+    
+    print("Bot is running...")
     application.run_polling()
 
 if __name__ == '__main__': main()
