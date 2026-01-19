@@ -1,3 +1,4 @@
+import logging
 import os
 import signal
 import sys
@@ -20,6 +21,9 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN not set in .env")
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # --- DATABASE SETUP (The "Business Ledger" with Expiry) ---
 def init_db():
@@ -83,7 +87,7 @@ HELP_TEXT = """
 /start - Re-introduces the bot and displays the main command menu.
 /setmodel [model] - Toggle between Grok (best for X-search), OpenAI, and Gemini.
 /scan [ticker] - Analyzes for CSP, CC, BPS, and CCS based on IV and technicals.
-/sentiment [sector] - Scans X/Web to suggest the best "Casino" move for a sector.
+/sentiment [sector or TICKERS] - Sector sentiment or ticker sentiment with auto sector context.
 /manage [ticker] - Checks your trades for 50-60% profit targets or Roll advice.
 /manageid [id] - Manage a specific open trade by its ID.
 /positions [ticker] - List open positions (optionally filtered by ticker).
@@ -102,10 +106,53 @@ def get_market_data(ticker_symbol):
         return {
             "price": info.get("regularMarketPrice") or info.get("currentPrice"),
             "earnings": next_earnings,
-            "iv_hint": info.get("beta")
+            "iv_hint": info.get("beta"),
+            "sector": info.get("sector") or "Unknown"
         }
     except Exception:
-        return {"price": "N/A", "earnings": "Check Broker", "iv_hint": "N/A"}
+        return {"price": "N/A", "earnings": "Check Broker", "iv_hint": "N/A", "sector": "Unknown"}
+
+
+def normalize_tickers(tokens: List[str]) -> List[str]:
+    normalized = []
+    for token in tokens:
+        for part in token.split(','):
+            cleaned = part.strip().upper()
+            if cleaned:
+                normalized.append(cleaned)
+    return normalized
+
+
+def is_ticker_like(token: str) -> bool:
+    token = token.strip().upper().strip(',')
+    if not token:
+        return False
+    cleaned = token.replace('.', '').replace('-', '')
+    return cleaned.isalnum() and token == token.upper() and len(cleaned) <= 6
+
+
+def derive_sectors_for_tickers(tickers: List[str]) -> Dict[str, str]:
+    sector_map: Dict[str, str] = {}
+    for ticker in tickers:
+        data = get_market_data(ticker)
+        sector = data.get("sector") or "Unknown"
+        if sector == "Unknown":
+            logger.info("Sector not found for ticker %s", ticker)
+        sector_map[ticker] = sector
+    return sector_map
+
+
+def build_ticker_sentiment_prompt(tickers: List[str], sector_map: Dict[str, str]) -> str:
+    sectors_lines = "\n".join([f"- {t}: {sector_map.get(t, 'Unknown')}" for t in tickers])
+    unique_sectors = [s for s in dict.fromkeys(sector_map.values())]
+    aggregate = ", ".join(unique_sectors) if unique_sectors else "Unknown"
+    return (
+        f"Tickers analyzed: {', '.join(tickers)}\n\n"
+        f"Derived sectors:\n{sectors_lines}\n\n"
+        f"Aggregate sector exposure: {aggregate}\n\n"
+        "Consider both ticker-specific sentiment and broader sector-level tailwinds/headwinds. "
+        "Impact on CSP, CC, BPS, and CCS? Best 'Casino' move?"
+    )
 
 # --- AI ROUTING LOGIC ---
 async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTEXT) -> str:
@@ -150,8 +197,24 @@ async def scan(update: Update, context: CallbackContext):
 
 async def sentiment(update: Update, context: CallbackContext):
     model = user_models.get(update.effective_chat.id, 'grok')
-    sector = ' '.join(context.args) or 'tech stocks'
-    prompt = f"Analyze sentiment for {sector}. Impact on CSP, CC, BPS, and CCS? Best 'Casino' move?."
+    args = context.args
+    tickers: List[str] = []
+
+    if args and args[0].lower() == '--tickers':
+        tickers = normalize_tickers(args[1:])
+        if not tickers:
+            return await update.message.reply_text("Usage: /sentiment --tickers AAPL,MSFT")
+    else:
+        candidate_tickers = normalize_tickers(args)
+        if candidate_tickers and all(is_ticker_like(t) for t in candidate_tickers):
+            tickers = candidate_tickers
+
+    if tickers:
+        sector_map = derive_sectors_for_tickers(tickers)
+        prompt = build_ticker_sentiment_prompt(tickers, sector_map)
+    else:
+        sector = ' '.join(args) or 'tech stocks'
+        prompt = f"Analyze sentiment for {sector}. Impact on CSP, CC, BPS, and CCS? Best 'Casino' move?."
     await handle_ai_request(update, context, model, prompt)
 
 async def manage(update: Update, context: CallbackContext):
