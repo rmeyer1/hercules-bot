@@ -4,4 +4,4 @@ requests
 xai-sdk
 yfinance
 pandas
-google-generativeai
+google-genai
