@@ -152,16 +152,46 @@ async def manage(update: Update, context: CallbackContext):
     await handle_ai_request(update, context, model, prompt)
 
 async def open_trade(update: Update, context: CallbackContext):
-    """Logs trade: /open [ticker] [type] [strike] [premium] [expiry:mm/dd/yyyy]"""
+    """
+    Command: /open [ticker] [type] [strike] [premium] [expiry]
+    """
+    args = context.args
+    arg_count = len(args)
+    
+    # DIAGNOSTIC: If it fails, tell us exactly why
+    if arg_count != 5:
+        error_msg = (
+            f"❌ **Argument Mismatch**\n"
+            f"Expected: 5 arguments\n"
+            f"Received: {arg_count}\n\n"
+            f"Your input: `{args}`\n\n"
+            f"Usage: `/open [TICKER] [TYPE] [STRIKE] [PREMIUM] [MM/DD/YYYY]`"
+        )
+        return await update.message.reply_markdown(error_msg)
+
     try:
-        ticker, t_type, strike, premium, expiry = context.args
-        conn = sqlite3.connect('trades.db'); c = conn.cursor()
-        c.execute("INSERT INTO trades (chat_id, ticker, type, strike, entry_price, date, expiry) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                  (update.effective_chat.id, ticker.upper(), t_type.upper(), strike, premium, datetime.now().strftime('%Y-%m-%d'), expiry))
-        conn.commit(); conn.close()
-        await update.message.reply_text(f"📈 Logged {ticker} {t_type} (Exp: {expiry}) at ${premium}. Business is open.")
-    except:
-        await update.message.reply_text("Usage: /open [ticker] [CSP/CC/BPS/CCS] [strike] [premium] [mm/dd/yyyy]")
+        ticker, t_type, strike, premium, expiry = args
+        
+        # Validate Date format briefly
+        try:
+            datetime.strptime(expiry, '%m/%d/%Y')
+        except ValueError:
+            return await update.message.reply_text("❌ Date must be in MM/DD/YYYY format.")
+
+        conn = sqlite3.connect('trades.db')
+        c = conn.cursor()
+        c.execute("""INSERT INTO trades (chat_id, ticker, type, strike, entry_price, date, expiry) 
+                     VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                  (update.effective_chat.id, ticker.upper(), t_type.upper(), 
+                   float(strike), float(premium), 
+                   datetime.now().strftime('%Y-%m-%d'), expiry))
+        conn.commit()
+        conn.close()
+        
+        await update.message.reply_text(f"✅ Business is open! Logged {ticker.upper()} {t_type.upper()} expiring {expiry}.")
+        
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Database/System Error: {str(e)}")
 
 async def handle_ai_request(update, context, model, prompt):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
