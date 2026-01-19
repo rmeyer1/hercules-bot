@@ -13,6 +13,7 @@ from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, CallbackContext
 
 import requests
+from typing import Optional, List, Dict
 
 load_dotenv()
 
@@ -24,16 +25,32 @@ if not TELEGRAM_TOKEN:
 def init_db():
     conn = sqlite3.connect('trades.db')
     c = conn.cursor()
-    # Added 'expiry' field to track DTE
+    # Added 'status' and 'closed_date' to support deterministic position management
     c.execute('''CREATE TABLE IF NOT EXISTS trades
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  chat_id INTEGER, 
-                  ticker TEXT, 
-                  type TEXT, 
-                  strike REAL, 
-                  entry_price REAL, 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  chat_id INTEGER,
+                  ticker TEXT,
+                  type TEXT,
+                  strike REAL,
+                  entry_price REAL,
                   date TEXT,
-                  expiry TEXT)''')
+                  expiry TEXT,
+                  status TEXT DEFAULT 'OPEN',
+                  closed_date TEXT)''')
+
+    # Backfill schema for existing databases
+    columns = {row[1] for row in c.execute("PRAGMA table_info(trades)")}
+    if 'status' not in columns:
+        c.execute("ALTER TABLE trades ADD COLUMN status TEXT DEFAULT 'OPEN'")
+        c.execute("UPDATE trades SET status = COALESCE(status, 'OPEN')")
+    if 'closed_date' not in columns:
+        c.execute("ALTER TABLE trades ADD COLUMN closed_date TEXT")
+
+    c.execute("""CREATE INDEX IF NOT EXISTS idx_trades_chat_ticker_status
+                 ON trades (chat_id, ticker, status)""")
+    c.execute("""CREATE INDEX IF NOT EXISTS idx_trades_chat_status
+                 ON trades (chat_id, status)""")
+
     conn.commit()
     conn.close()
 
@@ -68,6 +85,8 @@ HELP_TEXT = """
 /scan [ticker] - Analyzes for CSP, CC, BPS, and CCS based on IV and technicals.
 /sentiment [sector] - Scans X/Web to suggest the best "Casino" move for a sector.
 /manage [ticker] - Checks your trades for 50-60% profit targets or Roll advice.
+/manageid [id] - Manage a specific open trade by its ID.
+/positions [ticker] - List open positions (optionally filtered by ticker).
 /open [ticker] [type] [strike] [premium] [expiry] - Logs your trade (expiry: mm/dd/yyyy).
 
 *Remember: The gold is in managing the position.*
@@ -139,17 +158,51 @@ async def manage(update: Update, context: CallbackContext):
     model = user_models.get(update.effective_chat.id, 'grok')
     ticker = context.args[0].upper() if context.args else None
     if not ticker: return await update.message.reply_text("Usage: /manage [ticker]")
-    
-    conn = sqlite3.connect('trades.db'); c = conn.cursor()
-    # Now fetching expiry to help AI calculate DTE
-    c.execute("SELECT entry_price, type, expiry FROM trades WHERE ticker=? AND chat_id=? ORDER BY id DESC LIMIT 1", (ticker, update.effective_chat.id))
-    row = c.fetchone(); conn.close()
-    
+
+    positions = get_open_positions(update.effective_chat.id, ticker)
+    if not positions:
+        return await update.message.reply_text(f"No open positions for {ticker}.")
+
+    if len(positions) > 1:
+        lines = [format_position_line(p) for p in positions]
+        message = (f"⚠️ Multiple open positions found for {ticker}.\n"
+                   f"Please select one using /manageid <id>:\n\n" + "\n".join(lines))
+        return await update.message.reply_text(message)
+
+    trade = positions[0]
     market = get_market_data(ticker)
-    entry_info = f"Entry: ${row[0]} ({row[1]}) expiring {row[2]}" if row else "No entry data found."
-    prompt = (f"Manage {ticker}. {entry_info}. Market Price: ${market['price']}. Today: {datetime.now().strftime('%Y-%m-%d')}. "
-              f"Evaluate 50% profit target and provide Net Credit Roll advice.")
+    prompt = build_manage_prompt(trade, market)
     await handle_ai_request(update, context, model, prompt)
+
+
+async def manage_by_id(update: Update, context: CallbackContext):
+    model = user_models.get(update.effective_chat.id, 'grok')
+    if not context.args:
+        return await update.message.reply_text("Usage: /manageid [id]")
+    try:
+        trade_id = int(context.args[0])
+    except ValueError:
+        return await update.message.reply_text("Trade id must be a number.")
+
+    trade = get_trade_by_id(trade_id, update.effective_chat.id)
+    if not trade:
+        return await update.message.reply_text("No open trade found with that ID for this chat.")
+
+    market = get_market_data(trade["ticker"])
+    prompt = build_manage_prompt(trade, market)
+    await handle_ai_request(update, context, model, prompt)
+
+
+async def positions(update: Update, context: CallbackContext):
+    ticker_filter = context.args[0].upper() if context.args else None
+    trades = get_open_positions(update.effective_chat.id, ticker_filter)
+    if not trades:
+        msg = f"No open positions{f' for {ticker_filter}' if ticker_filter else ''}."
+        return await update.message.reply_text(msg)
+
+    header = f"Open positions{f' for {ticker_filter}' if ticker_filter else ''}:"
+    lines = [format_position_line(t) for t in trades]
+    await update.message.reply_text(f"{header}\n" + "\n".join(lines))
 
 async def open_trade(update: Update, context: CallbackContext):
     """
@@ -180,8 +233,8 @@ async def open_trade(update: Update, context: CallbackContext):
 
         conn = sqlite3.connect('trades.db')
         c = conn.cursor()
-        c.execute("""INSERT INTO trades (chat_id, ticker, type, strike, entry_price, date, expiry) 
-                     VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        c.execute("""INSERT INTO trades (chat_id, ticker, type, strike, entry_price, date, expiry, status, closed_date)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', NULL)""",
                   (update.effective_chat.id, ticker.upper(), t_type.upper(), 
                    float(strike), float(premium), 
                    datetime.now().strftime('%Y-%m-%d'), expiry))
@@ -203,6 +256,65 @@ async def handle_ai_request(update, context, model, prompt):
         else: await update.message.reply_markdown(result)
     except Exception as e: await update.message.reply_text(f"Error: {str(e)}")
 
+
+# --- TRADE HELPERS ---
+def row_to_dict(row: sqlite3.Row) -> Dict:
+    return {
+        "id": row["id"],
+        "ticker": row["ticker"],
+        "type": row["type"],
+        "strike": row["strike"],
+        "entry_price": row["entry_price"],
+        "expiry": row["expiry"],
+        "status": row["status"],
+        "closed_date": row["closed_date"],
+        "date": row["date"],
+    }
+
+
+def get_open_positions(chat_id: int, ticker: Optional[str] = None) -> List[Dict]:
+    conn = sqlite3.connect('trades.db')
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    if ticker:
+        c.execute("""SELECT id, ticker, type, strike, entry_price, date, expiry, status, closed_date
+                     FROM trades
+                     WHERE ticker=? AND chat_id=? AND status='OPEN'
+                     ORDER BY id DESC""", (ticker, chat_id))
+    else:
+        c.execute("""SELECT id, ticker, type, strike, entry_price, date, expiry, status, closed_date
+                     FROM trades
+                     WHERE chat_id=? AND status='OPEN'
+                     ORDER BY id DESC""", (chat_id,))
+    rows = [row_to_dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_trade_by_id(trade_id: int, chat_id: int) -> Optional[Dict]:
+    conn = sqlite3.connect('trades.db')
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("""SELECT id, ticker, type, strike, entry_price, date, expiry, status, closed_date
+                 FROM trades
+                 WHERE id=? AND chat_id=? AND status='OPEN'
+                 LIMIT 1""", (trade_id, chat_id))
+    row = c.fetchone()
+    conn.close()
+    return row_to_dict(row) if row else None
+
+
+def format_position_line(trade: Dict) -> str:
+    return f"• ID {trade['id']} — {trade['ticker']} {trade['type']} {trade['strike']} exp {trade['expiry']} entry {trade['entry_price']}"
+
+
+def build_manage_prompt(trade: Dict, market: Dict) -> str:
+    entry_info = (f"Entry: ${trade['entry_price']} ({trade['type']}) expiring {trade['expiry']} "
+                  f"(opened {trade['date']})")
+    return (f"Manage {trade['ticker']}. {entry_info}. Market Price: ${market['price']}. "
+            f"Today: {datetime.now().strftime('%Y-%m-%d')}. "
+            f"Evaluate 50% profit target and provide Net Credit Roll advice.")
+
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
@@ -211,6 +323,8 @@ def main():
     application.add_handler(CommandHandler("scan", scan))
     application.add_handler(CommandHandler("sentiment", sentiment))
     application.add_handler(CommandHandler("manage", manage))
+    application.add_handler(CommandHandler("manageid", manage_by_id))
+    application.add_handler(CommandHandler("positions", positions))
     application.add_handler(CommandHandler("open", open_trade))
     print("Bot is running...")
     application.run_polling()
