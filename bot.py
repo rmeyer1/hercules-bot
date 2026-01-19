@@ -13,7 +13,6 @@ from google.genai import types
 
 from telegram import Update
 from telegram.constants import ChatAction
-from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, CallbackContext
 
 import requests
@@ -382,6 +381,7 @@ async def handle_ai_request(update, context, model, prompt, task_type: str = 'sp
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
     try:
         result = await call_ai(model, prompt, task_type=task_type)
+
         if not result:
             result = "⚠️ AI returned no text (Check logs for tool output)."
 
@@ -390,13 +390,10 @@ async def handle_ai_request(update, context, model, prompt, task_type: str = 'sp
             buffer.name = 'response.txt'
             await update.message.reply_document(document=buffer, caption='Response is long — sent as file.')
         else:
-            try:
-                await update.message.reply_markdown(result)
-            except BadRequest:
-                logger.warning("Markdown failed for message: %s... Sending as plain text.", result[:50])
-                await update.message.reply_text(result)
+            await update.message.reply_text(result)
     except Exception as e:
-        await update.message.reply_text(f"Error: {str(e)}")
+        logger.error("Bot Reply Error: %s", e)
+        await update.message.reply_text(f"⚠️ System Error: {str(e)}")
 
 
 # --- TRADE HELPERS ---
