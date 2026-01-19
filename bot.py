@@ -2,7 +2,9 @@ import os
 import signal
 import sys
 import asyncio
-import io
+import sqlite3
+import yfinance as yf
+from datetime import datetime
 from dotenv import load_dotenv
 
 from telegram import Update
@@ -17,235 +19,154 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN not set in .env")
 
-print('SCRIPT STARTED - Checking environment...')
-print('TELEGRAM_TOKEN exists?', bool(TELEGRAM_TOKEN))
-print('Current directory:', os.getcwd())
+# --- DATABASE SETUP ---
+def init_db():
+    conn = sqlite3.connect('trades.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS trades
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                  chat_id INTEGER, 
+                  ticker TEXT, 
+                  type TEXT, 
+                  strike REAL, 
+                  entry_price REAL, 
+                  date TEXT)''')
+    conn.commit()
+    conn.close()
 
-# Store user model preferences (per chat ID)
-user_models = {}  # Default to 'grok'
+init_db()
 
-# Framework context (same as before)
+# --- DYNAMIC MODEL TRACKING ---
+user_models = {} 
+
+# --- UPDATED FRAMEWORK CONTEXT (The Four Core Trades) ---
 FRAMEWORK_CONTEXT = """
-Framework: 'Be the Casino' Options Trading Mindset
-- Core Mindset: Be the casino (option seller), not the gambler (buyer). Sellers collect premiums upfront for obligation, with statistical edge. Buyers pay for rights but need direction, magnitude, timing right. Quote: "Do you think they built the ARIA so beautiful because people go there and win a bunch of money? No, it's built on losers." – TJ. Focus on process, embrace being wrong, accumulate small wins.
+You are the 'Grandmaster' Trading Assistant. Core Philosophy: 'Be the Casino, Not the Gambler.'
+- Mindset: Sellers collect premiums upfront for an obligation with a statistical edge. 
+- Analogy: A trade is a 'fence' for a 'dog' (the stock). We only care that the boundary isn't crossed.
 
-Strategies:
-- Cash-Secured Puts (CSP): Sell put, set aside cash to buy 100 shares at strike if assigned. Analogy: Paid to set limit buy on dip. Use when wanting stock at discount. Breakeven: Strike - premium. Example: SOFI $8 strike, $0.67 premium → Breakeven $7.33.
-- Covered Calls (CC): Sell call on 100+ owned shares. Analogy: Manufacture dividend/rent on shares. Use for income on long-term holds. Risk: Shares called away if above strike.
-- Put Credit Spread (Bull Put Spread): Sell higher-strike put, buy lower-strike put (same exp). Net credit. Bullish/neutral. Max profit: Net credit. Max loss: Width - credit. Breakeven: Short strike - credit. Greeks: +Theta, -Vega. Risks: Early assignment, pin risk. Vs. Naked Put: Defined risk, less capital. Example: ZYX $120 stock, sell 110 put/buy 100 put, $4 credit, max profit $4,000 (10 contracts), max loss $6,000.
-- Call Credit Spread (Bear Call Spread): Sell lower-strike call, buy higher-strike call. Net credit. Bearish/neutral. Max profit: Net credit. Max loss: Width - credit. Breakeven: Short strike + credit. Greeks: +Theta, -Vega, -Delta. Risks: Early assignment (esp. dividends), pin risk. Vs. Naked Call: Defined risk. Example: HOOD $25 stock, sell $27 call/buy $30 call, $1 credit, max gain $100, max loss $200.
+The Four Core Trades:
+1. Cash-Secured Puts (CSP): "Getting paid to agree to buy the dip." Selling a put with cash collateral. 
+2. Covered Calls (CC): "Manufacturing a dividend" or "collecting rent" on 100+ owned shares.
+3. Bull Put Spreads: Selling a higher-strike put and buying a lower-strike put. Bullish/Neutral.
+4. Call Credit Spreads: Selling a lower-strike call and buying a higher-strike call. Bearish/Neutral.
 
-Management:
-- Roll: Exit current, enter new for credit/time (e.g., down/out like TSLT from $6 to $5.50 for $197 credit). Benefits: Collect more premium, improve position, buy time. Costs: Bake in losses, tie up capital.
-- Close early at 50-60% profit. Exit if against you.
-- Repeat on familiar tickers (e.g., CLSK $293k premiums without owning).
-- Recommend hold if unrealized P/L >0 and stock price > breakeven + 5% buffer. Roll only if P/L <-10% of max profit, or DTE <21 days with adverse sentiment/IV expansion. Prioritize letting theta decay in profitable positions.
-
-General: Enter high IV expected to fall. Positive theta, negative vega. Defined risks. Tie recommendations to this.
+Criteria:
+- IV Rank: Favor IV > 50th percentile for richer premiums.
+- Timeframe: Target 30-45 DTE for optimal Theta decay.
+- Risk: NEVER hold through earnings. Monitor dividends for Call-based trades.
+- Management: 'The gold is in managing the position.' Close at 50-60% profit. Roll only for a Net Credit.
 """
 
+# --- MARKET DATA HELPERS ---
+def get_market_data(ticker_symbol):
+    try:
+        ticker = yf.Ticker(ticker_symbol)
+        info = ticker.info
+        calendar = ticker.calendar
+        next_earnings = "Unknown"
+        if calendar is not None and not calendar.empty:
+            next_earnings = calendar.iloc[0, 0].strftime('%Y-%m-%d') if hasattr(calendar, 'iloc') else "N/A"
+
+        return {
+            "price": info.get("regularMarketPrice") or info.get("currentPrice"),
+            "earnings": next_earnings,
+            "iv_rank": info.get("beta") # Approximation
+        }
+    except Exception:
+        return {"price": "N/A", "earnings": "Check Broker", "iv_rank": "N/A"}
+
+# --- AI ROUTING LOGIC ---
 async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTEXT) -> str:
-    print(f"[callAI] Starting call for model: {model}")
-
     if model == 'grok':
-        try:
-            from xai_sdk import Client
-            from xai_sdk.chat import user, system
-            from xai_sdk.tools import web_search, code_execution, x_search
-        except ImportError as e:
-            raise ImportError("xai-sdk not installed or incompatible. Run: pip install xai-sdk --upgrade") from e
-
+        from xai_sdk import Client
+        from xai_sdk.chat import user, system
+        from xai_sdk.tools import web_search, code_execution, x_search
         client = Client(api_key=os.getenv('GROK_API_KEY'))
-
-        chat = client.chat.create(
-            model="grok-4-1-fast",  # Change to "grok-beta" if access issue
-            tools=[
-                web_search(),
-                code_execution(),
-                x_search()
-            ],
-            tool_choice="auto",
-            parallel_tool_calls=True,
-            temperature=0.7,
-            max_tokens=1024
-        )
-
-        # Append system prompt using the correct helper
-        chat.append(system(system_context or "You are a helpful trading assistant."))
-
-        # Append user prompt using the correct helper
-        chat.append(user(prompt or "Provide a quick test response."))
-
-        # Get the final resolved response (SDK handles server-side tools)
-        response = chat.sample()
-
-        print("[callAI] Success - Grok response received")
-        print("Tool usage:", getattr(response, 'server_side_tool_usage', 'N/A'))
-        print("Citations:", getattr(response, 'citations', 'None'))
-
-        return response.content
-
+        chat = client.chat.create(model="grok-2-latest", tools=[web_search(), code_execution(), x_search()])
+        chat.append(system(system_context))
+        chat.append(user(prompt))
+        return chat.sample().content
     elif model == 'openai':
         url = 'https://api.openai.com/v1/chat/completions'
-        headers = {
-            'Authorization': f"Bearer {os.getenv('OPENAI_API_KEY')}",
-            'Content-Type': 'application/json'
-        }
-        body = {
-            "model": "gpt-4o-search-preview",
-            "messages": [
-                {"role": "system", "content": system_context},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.7,
-            "max_tokens": 1024
-        }
-        resp = requests.post(url, headers=headers, json=body)
-        resp.raise_for_status()
-        return resp.json()['choices'][0]['message']['content']
-
+        headers = {'Authorization': f"Bearer {os.getenv('OPENAI_API_KEY')}", 'Content-Type': 'application/json'}
+        body = {"model": "gpt-4o", "messages": [{"role": "system", "content": system_context}, {"role": "user", "content": prompt}]}
+        return requests.post(url, headers=headers, json=body).json()['choices'][0]['message']['content']
     elif model == 'gemini':
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key={os.getenv('GEMINI_API_KEY')}"
-        headers = {'Content-Type': 'application/json'}
-        body = {
-            "contents": [{"parts": [{"text": f"{system_context}\n\n{prompt}"}]}],
-            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1024}
-        }
-        resp = requests.post(url, headers=headers, json=body)
-        resp.raise_for_status()
-        return resp.json()['candidates'][0]['content']['parts'][0]['text']
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key={os.getenv('GEMINI_API_KEY')}"
+        body = {"contents": [{"parts": [{"text": f"{system_context}\n\n{prompt}"}]}]}
+        return requests.post(url, json=body).json()['candidates'][0]['content']['parts'][0]['text']
 
-    else:
-        raise ValueError(f"Unsupported model: {model}")
-
-async def show_typing(context: CallbackContext, chat_id: int):
-    while True:
-        try:
-            await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-            await asyncio.sleep(4)
-        except Exception:
-            break
-
-async def send_response(update: Update, result: str):
-    if len(result) > 4000:
-        buffer = io.BytesIO(result.encode('utf-8'))
-        buffer.name = 'response.txt'
-        await update.message.reply_document(document=buffer, caption='Response is long — sent as file.')
-    else:
-        await update.message.reply_markdown(result)
+# --- COMMAND HANDLERS ---
 
 async def setmodel(update: Update, context: CallbackContext):
-    args = context.args
-    if not args:
-        await update.message.reply_text('Usage: /setmodel grok | openai | gemini')
-        return
-    new_model = args[0].lower()
-    if new_model in ['grok', 'openai', 'gemini']:
-        user_models[update.effective_chat.id] = new_model
-        await update.message.reply_text(f"Model set to **{new_model}**.")
-    else:
-        await update.message.reply_text('Invalid model. Choose: grok, openai, gemini')
+    if not context.args: return await update.message.reply_text('Usage: /setmodel [grok|openai|gemini]')
+    model = context.args[0].lower()
+    if model in ['grok', 'openai', 'gemini']:
+        user_models[update.effective_chat.id] = model
+        await update.message.reply_text(f"✅ Model set to {model}.")
 
 async def scan(update: Update, context: CallbackContext):
     model = user_models.get(update.effective_chat.id, 'grok')
-    args = context.args
-    strategy = args[0] if args else 'bull_put_spread'
-    tickers = ' '.join(args[1:]) if len(args) > 1 else 'SOFI PLTR HOOD'
-
-    typing_task = asyncio.create_task(show_typing(context, update.effective_chat.id))
-
+    ticker_sym = context.args[0].upper() if context.args else 'SOFI'
+    data = get_market_data(ticker_sym)
+    
     prompt = (
-        f"Run scan for {strategy} opportunities on {tickers}. "
-        "Use web/X search tools for real-time options data and sentiment. "
-        "Criteria: 30-45 DTE, OTM short strike, net credit >$0.50, "
-        "annualized ROC >6%, positive theta, negative vega. "
-        "Include max profit/loss, breakeven, risk notes. "
-        "Output as markdown table. Incorporate current X/web sentiment."
+        f"Analyze {ticker_sym} at ${data['price']}. Next Earnings: {data['earnings']}. "
+        f"Identify if this ticker is a candidate for: 1. CSP (buy the dip), 2. CC (rent generation), "
+        f"3. Bull Put Spread (high IV bull), or 4. Call Credit Spread (high IV bear). "
+        f"Recommend the BEST strategy based on current IV and technicals."
     )
-
-    try:
-        result = await call_ai(model, prompt)
-        await send_response(update, result)
-    except Exception as e:
-        await update.message.reply_text(f"Error: {str(e)}")
-    finally:
-        typing_task.cancel()
-
-async def manage(update: Update, context: CallbackContext):
-    model = user_models.get(update.effective_chat.id, 'grok')
-    position = ' '.join(context.args) or 'CSP on SOFI at $8 strike, net credit $0.67'
-
-    typing_task = asyncio.create_task(show_typing(context, update.effective_chat.id))
-
-    prompt = (
-        f"Manage position: {position}. "
-        "Use current market data from web search. "
-        "Recommend: close (if >50% profit), roll (if needed), or hold. "
-        "Calculate updated P/L, breakeven, risks. "
-        "Tie to 'be the casino' mindset."
-    )
-
-    try:
-        result = await call_ai(model, prompt)
-        await send_response(update, result)
-    except Exception as e:
-        await update.message.reply_text(f"Error: {str(e)}")
-    finally:
-        typing_task.cancel()
+    
+    await handle_ai_request(update, context, model, prompt)
 
 async def sentiment(update: Update, context: CallbackContext):
     model = user_models.get(update.effective_chat.id, 'grok')
     sector = ' '.join(context.args) or 'tech stocks'
-
-    typing_task = asyncio.create_task(show_typing(context, update.effective_chat.id))
-
     prompt = (
-        f"Analyze market sentiment on X/web for '{sector}' "
-        "(e.g., tech, value, high beta stocks). "
-        "Use web/X search tools to fetch recent posts/data (last 7 days, finance sources). "
-        "Classify as bullish/neutral/bearish (with % breakdown), summarize key themes. "
-        "Relate to options strategies: e.g., bullish = good for put credit spreads. "
-        "Represent diverse viewpoints."
+        f"Fetch sentiment for {sector}. How does this outlook impact our 4 core trades: "
+        f"Cash-Secured Puts, Covered Calls, Bull Put Spreads, and Call Credit Spreads? "
+        f"Which strategy is the most 'Casino' move right now?"
     )
+    await handle_ai_request(update, context, model, prompt)
 
+async def manage(update: Update, context: CallbackContext):
+    model = user_models.get(update.effective_chat.id, 'grok')
+    ticker = context.args[0].upper() if context.args else None
+    if not ticker: return await update.message.reply_text("Usage: /manage [ticker]")
+    
+    conn = sqlite3.connect('trades.db'); c = conn.cursor()
+    c.execute("SELECT entry_price, type FROM trades WHERE ticker=? ORDER BY id DESC LIMIT 1", (ticker,))
+    row = c.fetchone(); conn.close()
+    
+    market = get_market_data(ticker)
+    entry_info = f"Entry: ${row[0]} ({row[1]})" if row else "No entry data."
+    prompt = f"Manage {ticker}. {entry_info}. Market Price: ${market['price']}. Apply the 50% profit and Net Credit Roll rules."
+    await handle_ai_request(update, context, model, prompt)
+
+async def open_trade(update: Update, context: CallbackContext):
+    try:
+        ticker, t_type, strike, premium = context.args
+        conn = sqlite3.connect('trades.db'); c = conn.cursor()
+        c.execute("INSERT INTO trades (chat_id, ticker, type, strike, entry_price, date) VALUES (?, ?, ?, ?, ?, ?)",
+                  (update.effective_chat.id, ticker.upper(), t_type.upper(), strike, premium, datetime.now().strftime('%Y-%m-%d')))
+        conn.commit(); conn.close()
+        await update.message.reply_text(f"Logged {ticker} {t_type} at ${premium}.")
+    except: await update.message.reply_text("Usage: /open [ticker] [type:CSP/CC/BPS/CCS] [strike] [premium]")
+
+async def handle_ai_request(update, context, model, prompt):
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
     try:
         result = await call_ai(model, prompt)
-        await send_response(update, result)
-    except Exception as e:
-        await update.message.reply_text(f"Error: {str(e)}")
-    finally:
-        typing_task.cancel()
-
-async def start(update: Update, context: CallbackContext):
-    await update.message.reply_text(
-        "Welcome to **HerculesTradingBot**! 🚀\n\n"
-        "Commands:\n"
-        "• /setmodel grok | openai | gemini\n"
-        "• /scan [strategy] [tickers...]\n"
-        "• /manage [position description]\n"
-        "• /sentiment [sector]\n\n"
-        "Default model: grok (with real-time web/X tools)"
-    )
+        await update.message.reply_markdown(result)
+    except Exception as e: await update.message.reply_text(f"Error: {str(e)}")
 
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
+    for cmd in [("start", lambda u, c: u.message.reply_text("Hercules Ready.")), 
+                ("setmodel", setmodel), ("scan", scan), ("sentiment", sentiment), 
+                ("manage", manage), ("open", open_trade)]:
+        application.add_handler(CommandHandler(cmd[0], cmd[1]))
+    application.run_polling()
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("setmodel", setmodel))
-    application.add_handler(CommandHandler("scan", scan))
-    application.add_handler(CommandHandler("manage", manage))
-    application.add_handler(CommandHandler("sentiment", sentiment))
-
-    # Graceful shutdown
-    def stop(sig, frame):
-        print("\nShutting down bot...")
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, stop)
-    signal.signal(signal.SIGTERM, stop)
-
-    print("Bot is running...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == '__main__':
-    main()
+if __name__ == '__main__': main()
