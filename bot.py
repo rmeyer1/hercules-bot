@@ -279,10 +279,23 @@ async def sentiment(update: Update, context: CallbackContext):
 
     if tickers:
         sector_map = derive_sectors_for_tickers(tickers)
-        prompt = build_ticker_sentiment_prompt(tickers, sector_map)
+        base_context = build_ticker_sentiment_prompt(tickers, sector_map)
+
+        prompt = (
+            f"STEP 1: USE THE 'x_search' TOOL to find real-time posts and retail sentiment for: {', '.join(tickers)}. "
+            f"STEP 2: USE THE 'web_search' TOOL to find breaking news or catalyst events. "
+            f"STEP 3: Combine this LIVE DATA with the following context to decide the best 'Casino' trade (CSP/CC/Spreads). "
+            f"Do not answer from memory—use only retrieved results."
+            f"\n\nContext:\n{base_context}"
+        )
     else:
         sector = ' '.join(args) or 'tech stocks'
-        prompt = f"Analyze sentiment for {sector}. Impact on CSP, CC, BPS, and CCS? Best 'Casino' move?."
+        prompt = (
+            f"STEP 1: USE THE 'x_search' TOOL to find the current 'vibe' and retail sentiment for {sector}. "
+            f"STEP 2: USE THE 'web_search' TOOL to identify any sector-wide headwinds/tailwinds. "
+            f"IGNORE your internal training data; rely ONLY on the search results. "
+            f"What is the best 'Casino' move (CSP/CC/Spreads) based on this LIVE data?"
+        )
     await handle_ai_request(update, context, model, prompt, task_type='speed')
 
 async def manage(update: Update, context: CallbackContext):
