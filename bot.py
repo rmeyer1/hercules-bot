@@ -20,10 +20,11 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN not set in .env")
 
-# --- DATABASE SETUP (The "Business Ledger") ---
+# --- DATABASE SETUP (The "Business Ledger" with Expiry) ---
 def init_db():
     conn = sqlite3.connect('trades.db')
     c = conn.cursor()
+    # Added 'expiry' field to track DTE
     c.execute('''CREATE TABLE IF NOT EXISTS trades
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   chat_id INTEGER, 
@@ -31,32 +32,31 @@ def init_db():
                   type TEXT, 
                   strike REAL, 
                   entry_price REAL, 
-                  date TEXT)''')
+                  date TEXT,
+                  expiry TEXT)''')
     conn.commit()
     conn.close()
 
 init_db()
 
 # --- DYNAMIC MODEL TRACKING ---
-user_models = {} # Default to grok in handlers
+user_models = {} 
 
-# --- UPDATED FRAMEWORK CONTEXT (The Grandmaster's Wisdom) ---
+# --- UPDATED FRAMEWORK CONTEXT ---
 FRAMEWORK_CONTEXT = """
 You are the 'Grandmaster' Trading Assistant. Your core philosophy is 'Be the Casino, Not the Gambler.'
 - Mindset: Sellers collect premiums upfront for an obligation with a statistical edge.
-- Wisdom: "Do you think they built the ARIA so beautiful because people win? No, it's built on losers." - TJ.
 - Analogy: A credit spread is a 'fence' for a 'dog' (the stock). We only care that the boundary isn't crossed.
 
 The Four Core Trades:
 1. Cash-Secured Puts (CSP): Getting paid to agree to buy the dip.
 2. Covered Calls (CC): Collecting 'rent' on 100+ owned shares.
-3. Bull Put Spreads: Selling a higher-strike put, buying a lower-strike put (Bullish/Neutral).
-4. Call Credit Spreads: Selling a lower-strike call, buying a higher-strike call (Bearish/Neutral).
+3. Bull Put Spreads: Selling a higher-strike put, buying a lower-strike put.
+4. Call Credit Spreads: Selling a lower-strike call, buying a higher-strike call.
 
 Criteria:
 - IV Rank: Favor IV > 50th percentile.
-- Timeframe: Target 30-45 DTE for Theta decay.
-- Risk: NEVER hold through earnings. Monitor dividends for Call-based trades.
+- Timeframe: Target 30-45 DTE for optimal Theta decay.
 - Management: Close at 50-60% profit. Roll only for a Net Credit.
 """
 
@@ -68,29 +68,25 @@ HELP_TEXT = """
 /scan [ticker] - Analyzes for CSP, CC, BPS, and CCS based on IV and technicals.
 /sentiment [sector] - Scans X/Web to suggest the best "Casino" move for a sector.
 /manage [ticker] - Checks your trades for 50-60% profit targets or Roll advice.
-/open [ticker] [type] [strike] [premium] - Logs your trade into the ledger.
+/open [ticker] [type] [strike] [premium] [expiry] - Logs your trade (expiry: mm/dd/yyyy).
 
 *Remember: The gold is in managing the position.*
 """
 
 # --- MARKET DATA HELPERS ---
 def get_market_data(ticker_symbol):
-    """Fetches real-time facts to anchor the AI."""
     try:
         ticker = yf.Ticker(ticker_symbol)
         info = ticker.info
         calendar = ticker.calendar
-        next_earnings = "Unknown"
-        if calendar is not None and not calendar.empty:
-            next_earnings = calendar.iloc[0, 0].strftime('%Y-%m-%d') if hasattr(calendar, 'iloc') else "Check Broker"
-
+        next_earnings = calendar.iloc[0, 0].strftime('%Y-%m-%d') if calendar is not None and not calendar.empty else "Unknown"
         return {
             "price": info.get("regularMarketPrice") or info.get("currentPrice"),
             "earnings": next_earnings,
-            "iv_hint": info.get("beta") # Beta as proxy for free-tier volatility
+            "iv_hint": info.get("beta")
         }
     except Exception:
-        return {"price": "Error", "earnings": "Check Broker", "iv_hint": "N/A"}
+        return {"price": "N/A", "earnings": "Check Broker", "iv_hint": "N/A"}
 
 # --- AI ROUTING LOGIC ---
 async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTEXT) -> str:
@@ -129,22 +125,14 @@ async def scan(update: Update, context: CallbackContext):
     model = user_models.get(update.effective_chat.id, 'grok')
     ticker_sym = context.args[0].upper() if context.args else 'SOFI'
     data = get_market_data(ticker_sym)
-    
-    prompt = (
-        f"Analyze {ticker_sym} at ${data['price']}. Next Earnings: {data['earnings']}. "
-        f"Identify if this ticker is a candidate for: 1. CSP, 2. CC, 3. Bull Put Spread, or 4. Call Credit Spread. "
-        f"Recommend the BEST strategy based on 'Be the Casino' rules."
-    )
+    prompt = (f"Analyze {ticker_sym} at ${data['price']}. Next Earnings: {data['earnings']}. "
+              f"Identify best candidate from: CSP, CC, Bull Put Spread, or Call Credit Spread.")
     await handle_ai_request(update, context, model, prompt)
 
 async def sentiment(update: Update, context: CallbackContext):
     model = user_models.get(update.effective_chat.id, 'grok')
     sector = ' '.join(context.args) or 'tech stocks'
-    prompt = (
-        f"Analyze sentiment for {sector}. How does this impact our 4 core trades: "
-        f"CSP, CC, Bull Put Spreads, and Call Credit Spreads? "
-        f"Which is the best 'Casino' move right now?."
-    )
+    prompt = f"Analyze sentiment for {sector}. Impact on CSP, CC, BPS, and CCS? Best 'Casino' move?."
     await handle_ai_request(update, context, model, prompt)
 
 async def manage(update: Update, context: CallbackContext):
@@ -153,26 +141,27 @@ async def manage(update: Update, context: CallbackContext):
     if not ticker: return await update.message.reply_text("Usage: /manage [ticker]")
     
     conn = sqlite3.connect('trades.db'); c = conn.cursor()
-    c.execute("SELECT entry_price, type FROM trades WHERE ticker=? AND chat_id=? ORDER BY id DESC LIMIT 1", (ticker, update.effective_chat.id))
+    # Now fetching expiry to help AI calculate DTE
+    c.execute("SELECT entry_price, type, expiry FROM trades WHERE ticker=? AND chat_id=? ORDER BY id DESC LIMIT 1", (ticker, update.effective_chat.id))
     row = c.fetchone(); conn.close()
     
     market = get_market_data(ticker)
-    entry_info = f"Entry: ${row[0]} ({row[1]})" if row else "No entry data in ledger."
-    prompt = (
-        f"Manage {ticker}. {entry_info}. Market Price: ${market['price']}. "
-        f"Check the 50% profit target and provide Net Credit Roll advice."
-    )
+    entry_info = f"Entry: ${row[0]} ({row[1]}) expiring {row[2]}" if row else "No entry data found."
+    prompt = (f"Manage {ticker}. {entry_info}. Market Price: ${market['price']}. Today: {datetime.now().strftime('%Y-%m-%d')}. "
+              f"Evaluate 50% profit target and provide Net Credit Roll advice.")
     await handle_ai_request(update, context, model, prompt)
 
 async def open_trade(update: Update, context: CallbackContext):
+    """Logs trade: /open [ticker] [type] [strike] [premium] [expiry:mm/dd/yyyy]"""
     try:
-        ticker, t_type, strike, premium = context.args
+        ticker, t_type, strike, premium, expiry = context.args
         conn = sqlite3.connect('trades.db'); c = conn.cursor()
-        c.execute("INSERT INTO trades (chat_id, ticker, type, strike, entry_price, date) VALUES (?, ?, ?, ?, ?, ?)",
-                  (update.effective_chat.id, ticker.upper(), t_type.upper(), strike, premium, datetime.now().strftime('%Y-%m-%d')))
+        c.execute("INSERT INTO trades (chat_id, ticker, type, strike, entry_price, date, expiry) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                  (update.effective_chat.id, ticker.upper(), t_type.upper(), strike, premium, datetime.now().strftime('%Y-%m-%d'), expiry))
         conn.commit(); conn.close()
-        await update.message.reply_text(f"📈 Logged {ticker} {t_type} at ${premium}. Business is open.")
-    except: await update.message.reply_text("Usage: /open [ticker] [CSP/CC/BPS/CCS] [strike] [premium]")
+        await update.message.reply_text(f"📈 Logged {ticker} {t_type} (Exp: {expiry}) at ${premium}. Business is open.")
+    except:
+        await update.message.reply_text("Usage: /open [ticker] [CSP/CC/BPS/CCS] [strike] [premium] [mm/dd/yyyy]")
 
 async def handle_ai_request(update, context, model, prompt):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
@@ -193,7 +182,6 @@ def main():
     application.add_handler(CommandHandler("sentiment", sentiment))
     application.add_handler(CommandHandler("manage", manage))
     application.add_handler(CommandHandler("open", open_trade))
-    
     print("Bot is running...")
     application.run_polling()
 
