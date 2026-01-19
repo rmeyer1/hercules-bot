@@ -14,7 +14,8 @@ from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, CallbackContext
 
 import requests
-from typing import Optional, List, Dict
+import google.generativeai as genai
+from typing import Optional, List, Dict, Tuple
 
 load_dotenv()
 
@@ -63,6 +64,19 @@ init_db()
 # --- DYNAMIC MODEL TRACKING ---
 user_models = {} 
 
+def resolve_model(chat_id: int, command: str) -> Tuple[str, Optional[str]]:
+    user_choice = user_models.get(chat_id)
+    if user_choice:
+        return user_choice, None
+
+    recommended = {
+        "scan": ("gemini", "gemini-1.5-flash"),
+        "manage": ("gemini", "gemini-1.5-pro"),
+        "manageid": ("gemini", "gemini-1.5-pro"),
+        "sentiment": ("grok", None),
+    }
+    return recommended.get(command, ("grok", None))
+
 # --- UPDATED FRAMEWORK CONTEXT ---
 FRAMEWORK_CONTEXT = """
 You are the 'Grandmaster' Trading Assistant. Your core philosophy is 'Be the Casino, Not the Gambler.'
@@ -92,6 +106,11 @@ HELP_TEXT = """
 /manageid [id] - Manage a specific open trade by its ID.
 /positions [ticker] - List open positions (optionally filtered by ticker).
 /open [ticker] [type] [strike] [premium] [expiry] - Logs your trade (expiry: mm/dd/yyyy).
+
+Model recommendations (auto-applied unless you /setmodel):
+- /manage and /manageid ➜ Gemini 1.5 Pro (logic-heavy math)
+- /scan ➜ Gemini 1.5 Flash (fast, cost-efficient scans)
+- /sentiment ➜ Grok (live X/Twitter data)
 
 *Remember: The gold is in managing the position.*
 """
@@ -155,7 +174,7 @@ def build_ticker_sentiment_prompt(tickers: List[str], sector_map: Dict[str, str]
     )
 
 # --- AI ROUTING LOGIC ---
-async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTEXT) -> str:
+async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTEXT, gemini_model: Optional[str] = None) -> str:
     if model == 'grok':
         from xai_sdk import Client
         from xai_sdk.chat import user, system
@@ -171,9 +190,26 @@ async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTE
         body = {"model": "gpt-4o", "messages": [{"role": "system", "content": system_context}, {"role": "user", "content": prompt}]}
         return requests.post(url, headers=headers, json=body).json()['choices'][0]['message']['content']
     elif model == 'gemini':
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key={os.getenv('GEMINI_API_KEY')}"
-        body = {"contents": [{"parts": [{"text": f"{system_context}\n\n{prompt}"}]}]}
-        return requests.post(url, json=body).json()['candidates'][0]['content']['parts'][0]['text']
+        try:
+            api_key = os.getenv('GEMINI_API_KEY')
+            if not api_key:
+                raise ValueError("GEMINI_API_KEY not set")
+
+            genai.configure(api_key=api_key)
+            target_model = gemini_model or 'gemini-1.5-pro'
+            generative_model = genai.GenerativeModel(
+                model_name=target_model,
+                system_instruction=system_context,
+            )
+            response = generative_model.generate_content(prompt)
+            if hasattr(response, "text") and response.text:
+                return response.text
+            return "⚠️ AI Error: Empty response from Gemini."
+        except Exception as e:
+            logger.error("Gemini API Error: %s", e)
+            return f"⚠️ AI Error: {str(e)}"
+    else:
+        return "⚠️ AI Error: Unsupported model selection."
 
 # --- COMMAND HANDLERS ---
 
@@ -188,15 +224,15 @@ async def setmodel(update: Update, context: CallbackContext):
         await update.message.reply_text(f"✅ Model set to {model}.")
 
 async def scan(update: Update, context: CallbackContext):
-    model = user_models.get(update.effective_chat.id, 'grok')
+    model, gemini_model = resolve_model(update.effective_chat.id, 'scan')
     ticker_sym = context.args[0].upper() if context.args else 'SOFI'
     data = get_market_data(ticker_sym)
     prompt = (f"Analyze {ticker_sym} at ${data['price']}. Next Earnings: {data['earnings']}. "
               f"Identify best candidate from: CSP, CC, Bull Put Spread, or Call Credit Spread.")
-    await handle_ai_request(update, context, model, prompt)
+    await handle_ai_request(update, context, model, prompt, gemini_model)
 
 async def sentiment(update: Update, context: CallbackContext):
-    model = user_models.get(update.effective_chat.id, 'grok')
+    model, gemini_model = resolve_model(update.effective_chat.id, 'sentiment')
     args = context.args
     tickers: List[str] = []
 
@@ -215,10 +251,10 @@ async def sentiment(update: Update, context: CallbackContext):
     else:
         sector = ' '.join(args) or 'tech stocks'
         prompt = f"Analyze sentiment for {sector}. Impact on CSP, CC, BPS, and CCS? Best 'Casino' move?."
-    await handle_ai_request(update, context, model, prompt)
+    await handle_ai_request(update, context, model, prompt, gemini_model)
 
 async def manage(update: Update, context: CallbackContext):
-    model = user_models.get(update.effective_chat.id, 'grok')
+    model, gemini_model = resolve_model(update.effective_chat.id, 'manage')
     ticker = context.args[0].upper() if context.args else None
     if not ticker: return await update.message.reply_text("Usage: /manage [ticker]")
 
@@ -235,11 +271,11 @@ async def manage(update: Update, context: CallbackContext):
     trade = positions[0]
     market = get_market_data(ticker)
     prompt = build_manage_prompt(trade, market)
-    await handle_ai_request(update, context, model, prompt)
+    await handle_ai_request(update, context, model, prompt, gemini_model)
 
 
 async def manage_by_id(update: Update, context: CallbackContext):
-    model = user_models.get(update.effective_chat.id, 'grok')
+    model, gemini_model = resolve_model(update.effective_chat.id, 'manageid')
     if not context.args:
         return await update.message.reply_text("Usage: /manageid [id]")
     try:
@@ -253,7 +289,7 @@ async def manage_by_id(update: Update, context: CallbackContext):
 
     market = get_market_data(trade["ticker"])
     prompt = build_manage_prompt(trade, market)
-    await handle_ai_request(update, context, model, prompt)
+    await handle_ai_request(update, context, model, prompt, gemini_model)
 
 
 async def positions(update: Update, context: CallbackContext):
@@ -309,10 +345,10 @@ async def open_trade(update: Update, context: CallbackContext):
     except Exception as e:
         await update.message.reply_text(f"⚠️ Database/System Error: {str(e)}")
 
-async def handle_ai_request(update, context, model, prompt):
+async def handle_ai_request(update, context, model, prompt, gemini_model: Optional[str] = None):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
     try:
-        result = await call_ai(model, prompt)
+        result = await call_ai(model, prompt, system_context=FRAMEWORK_CONTEXT, gemini_model=gemini_model)
         if len(result) > 4000:
             buffer = io.BytesIO(result.encode('utf-8')); buffer.name = 'response.txt'
             await update.message.reply_document(document=buffer, caption='Response is long — sent as file.')
