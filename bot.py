@@ -9,6 +9,7 @@ import yfinance as yf
 from datetime import datetime
 from dotenv import load_dotenv
 from google import genai
+from google.genai import types
 
 from telegram import Update
 from telegram.constants import ChatAction
@@ -188,7 +189,7 @@ def build_ticker_sentiment_prompt(tickers: List[str], sector_map: Dict[str, str]
     )
 
 # --- AI ROUTING LOGIC ---
-async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTEXT, intent: str = "analysis") -> str:
+async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTEXT, task_type: str = "speed") -> str:
     if model == 'grok':
         from xai_sdk import Client
         from xai_sdk.chat import user, system
@@ -212,12 +213,21 @@ async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTE
             client = genai.Client(api_key=api_key)
 
             # Faster scans use Flash; management defaults to Pro for deeper reasoning.
-            model_name = 'gemini-1.5-flash' if intent == 'scan' else 'gemini-1.5-pro'
+            model_name = 'gemini-2.5-pro' if task_type == 'reasoning' else 'gemini-2.5-flash'
+            temperature = 0.2 if task_type == 'reasoning' else 0.7
 
-            config = genai.types.GenerateContentConfig(
-                system_instruction=system_context,
-                tools=[genai.types.Tool(google_search=genai.types.GoogleSearch())],
-            )
+            config_kwargs = {
+                "system_instruction": system_context,
+                "tools": [types.Tool(google_search=types.GoogleSearch())],
+                "temperature": temperature,
+            }
+
+            if task_type == 'reasoning':
+                thinking_cls = getattr(types, "ThinkingConfig", None)
+                if thinking_cls:
+                    config_kwargs["thinking_config"] = thinking_cls()
+
+            config = types.GenerateContentConfig(**config_kwargs)
 
             response = client.models.generate_content(
                 model=model_name,
@@ -251,7 +261,7 @@ async def scan(update: Update, context: CallbackContext):
     data = get_market_data(ticker_sym)
     prompt = (f"Analyze {ticker_sym} at ${data['price']}. Next Earnings: {data['earnings']}. "
               f"Identify best candidate from: CSP, CC, Bull Put Spread, or Call Credit Spread.")
-    await handle_ai_request(update, context, model, prompt, intent='scan')
+    await handle_ai_request(update, context, model, prompt, task_type='speed')
 
 async def sentiment(update: Update, context: CallbackContext):
     model = resolve_model(update.effective_chat.id, 'sentiment')
@@ -273,7 +283,7 @@ async def sentiment(update: Update, context: CallbackContext):
     else:
         sector = ' '.join(args) or 'tech stocks'
         prompt = f"Analyze sentiment for {sector}. Impact on CSP, CC, BPS, and CCS? Best 'Casino' move?."
-    await handle_ai_request(update, context, model, prompt, intent='sentiment')
+    await handle_ai_request(update, context, model, prompt, task_type='speed')
 
 async def manage(update: Update, context: CallbackContext):
     model = resolve_model(update.effective_chat.id, 'manage')
@@ -293,7 +303,7 @@ async def manage(update: Update, context: CallbackContext):
     trade = positions[0]
     market = get_market_data(ticker)
     prompt = build_manage_prompt(trade, market)
-    await handle_ai_request(update, context, model, prompt, intent='analysis')
+    await handle_ai_request(update, context, model, prompt, task_type='reasoning')
 
 
 async def manage_by_id(update: Update, context: CallbackContext):
@@ -311,7 +321,7 @@ async def manage_by_id(update: Update, context: CallbackContext):
 
     market = get_market_data(trade["ticker"])
     prompt = build_manage_prompt(trade, market)
-    await handle_ai_request(update, context, model, prompt, intent='analysis')
+    await handle_ai_request(update, context, model, prompt, task_type='reasoning')
 
 
 async def positions(update: Update, context: CallbackContext):
@@ -367,10 +377,10 @@ async def open_trade(update: Update, context: CallbackContext):
     except Exception as e:
         await update.message.reply_text(f"⚠️ Database/System Error: {str(e)}")
 
-async def handle_ai_request(update, context, model, prompt, intent: str = 'analysis'):
+async def handle_ai_request(update, context, model, prompt, task_type: str = 'speed'):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
     try:
-        result = await call_ai(model, prompt, intent=intent)
+        result = await call_ai(model, prompt, task_type=task_type)
         if len(result) > 4000:
             buffer = io.BytesIO(result.encode('utf-8')); buffer.name = 'response.txt'
             await update.message.reply_document(document=buffer, caption='Response is long — sent as file.')
