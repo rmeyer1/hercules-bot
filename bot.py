@@ -8,7 +8,7 @@ import sqlite3
 import yfinance as yf
 from datetime import datetime
 from dotenv import load_dotenv
-import google.generativeai as genai
+from google import genai
 
 from telegram import Update
 from telegram.constants import ChatAction
@@ -75,6 +75,26 @@ def resolve_model(chat_id: int, command: str) -> str:
     if command in ('scan', 'manage', 'manageid'):
         return 'gemini'
     return user_models.get(chat_id, 'gemini')
+
+
+def _extract_response_text(response) -> str:
+    """
+    Some Gemini responses (especially tool calls) may not populate .text directly.
+    This helper stitches together any text parts so we always return something user-visible.
+    """
+    if getattr(response, "text", None):
+        return response.text
+
+    text_parts = []
+    for candidate in getattr(response, "candidates", []) or []:
+        content = getattr(candidate, "content", None)
+        if not content:
+            continue
+        for part in getattr(content, "parts", []) or []:
+            part_text = getattr(part, "text", None)
+            if part_text:
+                text_parts.append(part_text)
+    return "\n".join(text_parts).strip()
 
 # --- UPDATED FRAMEWORK CONTEXT ---
 FRAMEWORK_CONTEXT = """
@@ -189,22 +209,24 @@ async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTE
             if not api_key:
                 raise ValueError("GEMINI_API_KEY not set in environment.")
 
-            genai.configure(api_key=api_key)
-
-            # Enable Google Search grounding to mirror Grok's real-time capabilities.
-            tools_config = [{"google_search": {}}]
+            client = genai.Client(api_key=api_key)
 
             # Faster scans use Flash; management defaults to Pro for deeper reasoning.
             model_name = 'gemini-1.5-flash' if intent == 'scan' else 'gemini-1.5-pro'
 
-            generative_model = genai.GenerativeModel(
-                model_name=model_name,
+            config = genai.types.GenerateContentConfig(
                 system_instruction=system_context,
-                tools=tools_config
+                tools=[genai.types.Tool(google_search=genai.types.GoogleSearch())],
             )
 
-            response = generative_model.generate_content(prompt)
-            return response.text
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=config,
+            )
+
+            result_text = _extract_response_text(response)
+            return result_text or "⚠️ AI Error: Empty response from Gemini."
         except Exception as e:
             logger.error("Gemini API Error: %s", e)
             return f"⚠️ AI Error: {str(e)}"
