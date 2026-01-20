@@ -199,7 +199,7 @@ async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTE
 
         api_key = os.getenv('XAI_API_KEY') or os.getenv('GROK_API_KEY')
         if not api_key:
-            raise ValueError("XAI_API_KEY or GROK_API_KEY not set in environment.")
+            raise ValueError("XAI_API_KEY or GROK_API_KEY not set.")
 
         client = Client(api_key=api_key)
 
@@ -208,11 +208,7 @@ async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTE
             "tools": [web_search(), code_execution(), x_search()],
         }
 
-        try:
-            chat = client.chat.create(include=["verbose_streaming"], **chat_kwargs)
-        except TypeError:
-            logger.info("xai_sdk chat.create does not support 'include'; retrying without it.")
-            chat = client.chat.create(**chat_kwargs)
+        chat = client.chat.create(**chat_kwargs)
         chat.append(system(system_context))
         chat.append(user(prompt))
 
