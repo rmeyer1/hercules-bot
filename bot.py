@@ -14,6 +14,7 @@ from google.genai import types
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, CallbackContext
+from telegram.request import HTTPXRequest  # Added for Timeout Configuration
 
 import requests
 from typing import Optional, List, Dict, Tuple
@@ -289,11 +290,9 @@ async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTE
 # --- COMMAND HANDLERS ---
 
 async def start(update: Update, context: CallbackContext):
-    # FIX: Use effective_message to prevent NoneType errors
     await update.effective_message.reply_markdown(f"Welcome to **HerculesTradingBot**! 🚀\n\n{HELP_TEXT}")
 
 async def setmodel(update: Update, context: CallbackContext):
-    # FIX: Use effective_message to prevent NoneType errors
     if not context.args: return await update.effective_message.reply_text('Usage: /setmodel [grok|openai|gemini]')
     model = context.args[0].lower()
     if model in ['grok', 'openai', 'gemini']:
@@ -318,7 +317,6 @@ async def sentiment(update: Update, context: CallbackContext):
     if args and args[0].lower() == '--tickers':
         tickers = normalize_tickers(args[1:])
         if not tickers:
-            # FIX: Use effective_message
             return await update.effective_message.reply_text("Usage: /sentiment --tickers AAPL,MSFT")
     else:
         candidate_tickers = normalize_tickers(args)
@@ -352,7 +350,6 @@ async def manage(update: Update, context: CallbackContext):
     model = resolve_model(update.effective_chat.id, 'manage')
     ticker = context.args[0].upper() if context.args else None
     if not ticker: 
-        # FIX: Use effective_message
         return await update.effective_message.reply_text("Usage: /manage [ticker]")
 
     positions = get_open_positions(update.effective_chat.id, ticker)
@@ -374,7 +371,6 @@ async def manage(update: Update, context: CallbackContext):
 async def manage_by_id(update: Update, context: CallbackContext):
     model = resolve_model(update.effective_chat.id, 'manageid')
     if not context.args:
-        # FIX: Use effective_message
         return await update.effective_message.reply_text("Usage: /manageid [id]")
     try:
         trade_id = int(context.args[0])
@@ -395,7 +391,6 @@ async def positions(update: Update, context: CallbackContext):
     trades = get_open_positions(update.effective_chat.id, ticker_filter)
     if not trades:
         msg = f"No open positions{f' for {ticker_filter}' if ticker_filter else ''}."
-        # FIX: Use effective_message
         return await update.effective_message.reply_text(msg)
 
     header = f"Open positions{f' for {ticker_filter}' if ticker_filter else ''}:"
@@ -418,7 +413,6 @@ async def open_trade(update: Update, context: CallbackContext):
             f"Your input: `{args}`\n\n"
             f"Usage: `/open [TICKER] [TYPE] [STRIKE] [PREMIUM] [MM/DD/YYYY]`"
         )
-        # FIX: Use effective_message
         return await update.effective_message.reply_markdown(error_msg)
 
     try:
@@ -446,7 +440,12 @@ async def open_trade(update: Update, context: CallbackContext):
         await update.effective_message.reply_text(f"⚠️ Database/System Error: {str(e)}")
 
 async def handle_ai_request(update, context, model, prompt, task_type: str = 'speed'):
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+    # FIX: Wrap "Typing..." action in try/except so network jitter doesn't crash the bot
+    try:
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+    except Exception as e:
+        logger.warning(f"Could not send typing action (harmless network issue): {e}")
+
     try:
         result, citations = await call_ai(model, prompt, task_type=task_type)
 
@@ -465,14 +464,11 @@ async def handle_ai_request(update, context, model, prompt, task_type: str = 'sp
         if len(result) > 4000:
             buffer = io.BytesIO(result.encode('utf-8'))
             buffer.name = 'response.txt'
-            # FIX: Use effective_message to prevent NoneType attribute error
             await update.effective_message.reply_document(document=buffer, caption='Response is long — sent as file.')
         else:
-            # FIX: Use effective_message and reply_text (Plain Text) to prevent NoneType AND Markdown errors
             await update.effective_message.reply_text(result)
     except Exception as e:
         logger.error("Bot Reply Error: %s", e)
-        # FIX: Use effective_message
         await update.effective_message.reply_text(f"⚠️ System Error: {str(e)}")
 
 
@@ -528,7 +524,7 @@ def format_position_line(trade: Dict) -> str:
 
 
 def build_manage_prompt(trade: Dict, market: Dict) -> str:
-    # FIX: Explicitly include Strike Price to prevent AI hallucinating the Premium as the Strike
+    # Explicitly include Strike Price to prevent AI hallucinating the Premium as the Strike
     entry_info = (f"Position: {trade['type']} @ Strike: ${trade['strike']}. "
                   f"Premium Collected: ${trade['entry_price']}. "
                   f"Expiry: {trade['expiry']} (Opened: {trade['date']})")
@@ -539,8 +535,11 @@ def build_manage_prompt(trade: Dict, market: Dict) -> str:
             f"Evaluate 50% profit target and provide Net Credit Roll advice.")
 
 def main():
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    # FIX: Use effective_message in the lambda as well
+    # FIX: Increased timeout configuration
+    request = HTTPXRequest(connect_timeout=60.0, read_timeout=60.0)
+    
+    application = Application.builder().token(TELEGRAM_TOKEN).request(request).build()
+    
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", lambda u, c: u.effective_message.reply_markdown(HELP_TEXT)))
     application.add_handler(CommandHandler("setmodel", setmodel))
