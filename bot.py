@@ -197,7 +197,16 @@ async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTE
         from xai_sdk.chat import user, system
         from xai_sdk.tools import web_search, code_execution, x_search
 
-        client = Client(api_key=os.getenv('GROK_API_KEY'), include=["inline_citations"])
+        api_key = os.getenv('GROK_API_KEY')
+        if not api_key:
+            raise ValueError("GROK_API_KEY not set in environment.")
+
+        client_kwargs = {"api_key": api_key}
+        try:
+            client = Client(include=["inline_citations"], **client_kwargs)
+        except TypeError:
+            logger.info("xai_sdk Client does not support 'include'; retrying without inline citations.")
+            client = Client(**client_kwargs)
         chat = client.chat.create(model="grok-4-1-fast", tools=[web_search(), code_execution(), x_search()])
         chat.append(system(system_context))
         chat.append(user(prompt))
