@@ -516,10 +516,12 @@ def format_position_line(trade: Dict) -> str:
 
 
 def build_manage_prompt(trade: Dict, market: Dict) -> str:
-    entry_info = (f"Entry: ${trade['entry_price']} ({trade['type']}) expiring {trade['expiry']} "
-                  f"(opened {trade['date']})")
-    return (f"Manage {trade['ticker']}. {entry_info}. Market Price: ${market['price']}. "
+    entry_info = (f"Position: {trade['type']} @ Strike: ${trade['strike']}. "
+                  f"Premium Collected: ${trade['entry_price']}. "
+                  f"Expiry: {trade['expiry']} (Opened: {trade['date']})")
+    return (f"Manage {trade['ticker']}. {entry_info}. Current Market Price: ${market['price']}. "
             f"Today: {datetime.now().strftime('%Y-%m-%d')}. "
+            f"Calculate current profit/loss based on decay. "
             f"Evaluate 50% profit target and provide Net Credit Roll advice.")
 
 def main():
