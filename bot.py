@@ -16,7 +16,7 @@ from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, CallbackContext
 
 import requests
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 
 load_dotenv()
 
@@ -185,25 +185,40 @@ def build_ticker_sentiment_prompt(tickers: List[str], sector_map: Dict[str, str]
         f"Derived sectors:\n{sectors_lines}\n\n"
         f"Aggregate sector exposure: {aggregate}\n\n"
         "Consider both ticker-specific sentiment and broader sector-level tailwinds/headwinds. "
-        "Impact on CSP, CC, BPS, and CCS? Best 'Casino' move?"
+        "Describe how the tone differs by ticker/sector and note any contrarian or risk signals shaping psychology."
     )
 
 # --- AI ROUTING LOGIC ---
-async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTEXT, task_type: str = "speed") -> str:
+async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTEXT, task_type: str = "speed") -> Tuple[str, List[str]]:
+    citations: List[str] = []
+
     if model == 'grok':
         from xai_sdk import Client
         from xai_sdk.chat import user, system
         from xai_sdk.tools import web_search, code_execution, x_search
-        client = Client(api_key=os.getenv('GROK_API_KEY'))
+
+        client = Client(api_key=os.getenv('GROK_API_KEY'), include=["inline_citations"])
         chat = client.chat.create(model="grok-4-1-fast", tools=[web_search(), code_execution(), x_search()])
         chat.append(system(system_context))
         chat.append(user(prompt))
-        return chat.sample().content
+        response = chat.sample()
+
+        content = getattr(response, "content", "")
+        raw_citations = getattr(response, "citations", None) or []
+        for entry in raw_citations:
+            url = entry if isinstance(entry, str) else getattr(entry, "url", None)
+            if url:
+                citations.append(url)
+
+        return content, citations
+
     elif model == 'openai':
         url = 'https://api.openai.com/v1/chat/completions'
         headers = {'Authorization': f"Bearer {os.getenv('OPENAI_API_KEY')}", 'Content-Type': 'application/json'}
         body = {"model": "gpt-4o", "messages": [{"role": "system", "content": system_context}, {"role": "user", "content": prompt}]}
-        return requests.post(url, headers=headers, json=body).json()['choices'][0]['message']['content']
+        content = requests.post(url, headers=headers, json=body).json()['choices'][0]['message']['content']
+        return content, citations
+
     elif model == 'gemini':
         try:
             api_key = os.getenv('GEMINI_API_KEY')
@@ -236,10 +251,11 @@ async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTE
             )
 
             result_text = _extract_response_text(response)
-            return result_text or "⚠️ AI Error: Empty response from Gemini."
+            content = result_text or "⚠️ AI Error: Empty response from Gemini."
+            return content, citations
         except Exception as e:
             logger.error("Gemini API Error: %s", e)
-            return f"⚠️ AI Error: {str(e)}"
+            return f"⚠️ AI Error: {str(e)}", citations
 
 # --- COMMAND HANDLERS ---
 
@@ -284,8 +300,9 @@ async def sentiment(update: Update, context: CallbackContext):
         prompt = (
             f"STEP 1: USE THE 'x_search' TOOL to find real-time posts and retail sentiment for: {', '.join(tickers)}. "
             f"STEP 2: USE THE 'web_search' TOOL to find breaking news or catalyst events. "
-            f"STEP 3: Combine this LIVE DATA with the following context to decide the best 'Casino' trade (CSP/CC/Spreads). "
-            f"Do not answer from memory—use only retrieved results."
+            f"STEP 3: Synthesize a 'Sentiment Verdict'. Summarize the dominant market mood (Bullish/Bearish/Neutral) "
+            f"and provide specific COUNTER-ARGUMENTS or risks to the consensus view. Focus on market psychology. DO NOT recommend trades. "
+            f"IGNORE your internal training data; respond ONLY with LIVE DATA from the tools."
             f"\n\nContext:\n{base_context}"
         )
     else:
@@ -293,8 +310,9 @@ async def sentiment(update: Update, context: CallbackContext):
         prompt = (
             f"STEP 1: USE THE 'x_search' TOOL to find the current 'vibe' and retail sentiment for {sector}. "
             f"STEP 2: USE THE 'web_search' TOOL to identify any sector-wide headwinds/tailwinds. "
-            f"IGNORE your internal training data; rely ONLY on the search results. "
-            f"What is the best 'Casino' move (CSP/CC/Spreads) based on this LIVE data?"
+            f"STEP 3: Synthesize a 'Sentiment Verdict'. Summarize the dominant market mood (Bullish/Bearish/Neutral) "
+            f"and provide specific COUNTER-ARGUMENTS or risks to the consensus view. Focus on the psychological state of the market. "
+            f"DO NOT recommend specific trades. IGNORE your internal training data; rely ONLY on the search results."
         )
     await handle_ai_request(update, context, model, prompt, task_type='speed')
 
@@ -393,10 +411,19 @@ async def open_trade(update: Update, context: CallbackContext):
 async def handle_ai_request(update, context, model, prompt, task_type: str = 'speed'):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
     try:
-        result = await call_ai(model, prompt, task_type=task_type)
+        result, citations = await call_ai(model, prompt, task_type=task_type)
 
         if not result:
             result = "⚠️ AI returned no text (Check logs for tool output)."
+
+        if citations:
+            deduped = []
+            for url in citations:
+                if url and url not in deduped:
+                    deduped.append(url)
+            if deduped:
+                sources_block = "\n".join(f"- {url}" for url in deduped)
+                result = f"{result}\n\nSources:\n{sources_block}"
 
         if len(result) > 4000:
             buffer = io.BytesIO(result.encode('utf-8'))
