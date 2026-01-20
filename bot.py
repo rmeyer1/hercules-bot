@@ -206,6 +206,7 @@ async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTE
         chat_kwargs = {
             "model": "grok-4-1-fast",
             "tools": [web_search(), code_execution(), x_search()],
+            "include": ["inline_citations"]
         }
 
         chat = client.chat.create(**chat_kwargs)
@@ -288,14 +289,16 @@ async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTE
 # --- COMMAND HANDLERS ---
 
 async def start(update: Update, context: CallbackContext):
-    await update.message.reply_markdown(f"Welcome to **HerculesTradingBot**! 🚀\n\n{HELP_TEXT}")
+    # FIX: Use effective_message to prevent NoneType errors
+    await update.effective_message.reply_markdown(f"Welcome to **HerculesTradingBot**! 🚀\n\n{HELP_TEXT}")
 
 async def setmodel(update: Update, context: CallbackContext):
-    if not context.args: return await update.message.reply_text('Usage: /setmodel [grok|openai|gemini]')
+    # FIX: Use effective_message to prevent NoneType errors
+    if not context.args: return await update.effective_message.reply_text('Usage: /setmodel [grok|openai|gemini]')
     model = context.args[0].lower()
     if model in ['grok', 'openai', 'gemini']:
         user_models[update.effective_chat.id] = model
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             f"✅ Model set to {model}. Note: /sentiment always uses Grok; /scan and /manage use Gemini with Google Search."
         )
 
@@ -315,7 +318,8 @@ async def sentiment(update: Update, context: CallbackContext):
     if args and args[0].lower() == '--tickers':
         tickers = normalize_tickers(args[1:])
         if not tickers:
-            return await update.message.reply_text("Usage: /sentiment --tickers AAPL,MSFT")
+            # FIX: Use effective_message
+            return await update.effective_message.reply_text("Usage: /sentiment --tickers AAPL,MSFT")
     else:
         candidate_tickers = normalize_tickers(args)
         if candidate_tickers and all(is_ticker_like(t) for t in candidate_tickers):
@@ -347,17 +351,19 @@ async def sentiment(update: Update, context: CallbackContext):
 async def manage(update: Update, context: CallbackContext):
     model = resolve_model(update.effective_chat.id, 'manage')
     ticker = context.args[0].upper() if context.args else None
-    if not ticker: return await update.message.reply_text("Usage: /manage [ticker]")
+    if not ticker: 
+        # FIX: Use effective_message
+        return await update.effective_message.reply_text("Usage: /manage [ticker]")
 
     positions = get_open_positions(update.effective_chat.id, ticker)
     if not positions:
-        return await update.message.reply_text(f"No open positions for {ticker}.")
+        return await update.effective_message.reply_text(f"No open positions for {ticker}.")
 
     if len(positions) > 1:
         lines = [format_position_line(p) for p in positions]
         message = (f"⚠️ Multiple open positions found for {ticker}.\n"
                    f"Please select one using /manageid <id>:\n\n" + "\n".join(lines))
-        return await update.message.reply_text(message)
+        return await update.effective_message.reply_text(message)
 
     trade = positions[0]
     market = get_market_data(ticker)
@@ -368,15 +374,16 @@ async def manage(update: Update, context: CallbackContext):
 async def manage_by_id(update: Update, context: CallbackContext):
     model = resolve_model(update.effective_chat.id, 'manageid')
     if not context.args:
-        return await update.message.reply_text("Usage: /manageid [id]")
+        # FIX: Use effective_message
+        return await update.effective_message.reply_text("Usage: /manageid [id]")
     try:
         trade_id = int(context.args[0])
     except ValueError:
-        return await update.message.reply_text("Trade id must be a number.")
+        return await update.effective_message.reply_text("Trade id must be a number.")
 
     trade = get_trade_by_id(trade_id, update.effective_chat.id)
     if not trade:
-        return await update.message.reply_text("No open trade found with that ID for this chat.")
+        return await update.effective_message.reply_text("No open trade found with that ID for this chat.")
 
     market = get_market_data(trade["ticker"])
     prompt = build_manage_prompt(trade, market)
@@ -388,11 +395,12 @@ async def positions(update: Update, context: CallbackContext):
     trades = get_open_positions(update.effective_chat.id, ticker_filter)
     if not trades:
         msg = f"No open positions{f' for {ticker_filter}' if ticker_filter else ''}."
-        return await update.message.reply_text(msg)
+        # FIX: Use effective_message
+        return await update.effective_message.reply_text(msg)
 
     header = f"Open positions{f' for {ticker_filter}' if ticker_filter else ''}:"
     lines = [format_position_line(t) for t in trades]
-    await update.message.reply_text(f"{header}\n" + "\n".join(lines))
+    await update.effective_message.reply_text(f"{header}\n" + "\n".join(lines))
 
 async def open_trade(update: Update, context: CallbackContext):
     """
@@ -410,7 +418,8 @@ async def open_trade(update: Update, context: CallbackContext):
             f"Your input: `{args}`\n\n"
             f"Usage: `/open [TICKER] [TYPE] [STRIKE] [PREMIUM] [MM/DD/YYYY]`"
         )
-        return await update.message.reply_markdown(error_msg)
+        # FIX: Use effective_message
+        return await update.effective_message.reply_markdown(error_msg)
 
     try:
         ticker, t_type, strike, premium, expiry = args
@@ -419,7 +428,7 @@ async def open_trade(update: Update, context: CallbackContext):
         try:
             datetime.strptime(expiry, '%m/%d/%Y')
         except ValueError:
-            return await update.message.reply_text("❌ Date must be in MM/DD/YYYY format.")
+            return await update.effective_message.reply_text("❌ Date must be in MM/DD/YYYY format.")
 
         conn = sqlite3.connect('trades.db')
         c = conn.cursor()
@@ -431,10 +440,10 @@ async def open_trade(update: Update, context: CallbackContext):
         conn.commit()
         conn.close()
         
-        await update.message.reply_text(f"✅ Business is open! Logged {ticker.upper()} {t_type.upper()} expiring {expiry}.")
+        await update.effective_message.reply_text(f"✅ Business is open! Logged {ticker.upper()} {t_type.upper()} expiring {expiry}.")
         
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Database/System Error: {str(e)}")
+        await update.effective_message.reply_text(f"⚠️ Database/System Error: {str(e)}")
 
 async def handle_ai_request(update, context, model, prompt, task_type: str = 'speed'):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
@@ -456,12 +465,15 @@ async def handle_ai_request(update, context, model, prompt, task_type: str = 'sp
         if len(result) > 4000:
             buffer = io.BytesIO(result.encode('utf-8'))
             buffer.name = 'response.txt'
-            await update.message.reply_document(document=buffer, caption='Response is long — sent as file.')
+            # FIX: Use effective_message to prevent NoneType attribute error
+            await update.effective_message.reply_document(document=buffer, caption='Response is long — sent as file.')
         else:
-            await update.message.reply_text(result)
+            # FIX: Use effective_message and reply_text (Plain Text) to prevent NoneType AND Markdown errors
+            await update.effective_message.reply_text(result)
     except Exception as e:
         logger.error("Bot Reply Error: %s", e)
-        await update.message.reply_text(f"⚠️ System Error: {str(e)}")
+        # FIX: Use effective_message
+        await update.effective_message.reply_text(f"⚠️ System Error: {str(e)}")
 
 
 # --- TRADE HELPERS ---
@@ -516,9 +528,11 @@ def format_position_line(trade: Dict) -> str:
 
 
 def build_manage_prompt(trade: Dict, market: Dict) -> str:
+    # FIX: Explicitly include Strike Price to prevent AI hallucinating the Premium as the Strike
     entry_info = (f"Position: {trade['type']} @ Strike: ${trade['strike']}. "
                   f"Premium Collected: ${trade['entry_price']}. "
                   f"Expiry: {trade['expiry']} (Opened: {trade['date']})")
+    
     return (f"Manage {trade['ticker']}. {entry_info}. Current Market Price: ${market['price']}. "
             f"Today: {datetime.now().strftime('%Y-%m-%d')}. "
             f"Calculate current profit/loss based on decay. "
@@ -526,8 +540,9 @@ def build_manage_prompt(trade: Dict, market: Dict) -> str:
 
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
+    # FIX: Use effective_message in the lambda as well
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", lambda u, c: u.message.reply_markdown(HELP_TEXT)))
+    application.add_handler(CommandHandler("help", lambda u, c: u.effective_message.reply_markdown(HELP_TEXT)))
     application.add_handler(CommandHandler("setmodel", setmodel))
     application.add_handler(CommandHandler("scan", scan))
     application.add_handler(CommandHandler("sentiment", sentiment))
