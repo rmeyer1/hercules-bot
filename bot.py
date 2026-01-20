@@ -197,14 +197,46 @@ async def call_ai(model: str, prompt: str, system_context: str = FRAMEWORK_CONTE
         from xai_sdk.chat import user, system
         from xai_sdk.tools import web_search, code_execution, x_search
 
-        client = Client(api_key=os.getenv('GROK_API_KEY'), include=["inline_citations"])
-        chat = client.chat.create(model="grok-4-1-fast", tools=[web_search(), code_execution(), x_search()])
+        api_key = os.getenv('XAI_API_KEY') or os.getenv('GROK_API_KEY')
+        if not api_key:
+            raise ValueError("XAI_API_KEY or GROK_API_KEY not set in environment.")
+
+        client = Client(api_key=api_key)
+
+        chat_kwargs = {
+            "model": "grok-4-1-fast",
+            "tools": [web_search(), code_execution(), x_search()],
+        }
+
+        try:
+            chat = client.chat.create(include=["verbose_streaming"], **chat_kwargs)
+        except TypeError:
+            logger.info("xai_sdk chat.create does not support 'include'; retrying without it.")
+            chat = client.chat.create(**chat_kwargs)
         chat.append(system(system_context))
         chat.append(user(prompt))
-        response = chat.sample()
 
-        content = getattr(response, "content", "")
-        raw_citations = getattr(response, "citations", None) or []
+        final_response = None
+        content_parts: List[str] = []
+
+        try:
+            for response, chunk in chat.stream():
+                final_response = response
+                chunk_text = getattr(chunk, "content", None)
+                if chunk_text:
+                    content_parts.append(chunk_text)
+        except AttributeError:
+            logger.info("xai_sdk chat object does not support streaming; falling back to sample().")
+            final_response = chat.sample()
+            fallback_content = getattr(final_response, "content", "")
+            if fallback_content:
+                content_parts.append(fallback_content)
+
+        content = "".join(content_parts).strip()
+        if not content and final_response:
+            content = getattr(final_response, "content", "") or ""
+
+        raw_citations = getattr(final_response, "citations", None) or []
         for entry in raw_citations:
             url = entry if isinstance(entry, str) else getattr(entry, "url", None)
             if url:
