@@ -154,14 +154,16 @@ def get_market_data(ticker_symbol):
         if isinstance(price, (int, float)):
             price = f"{price:.2f}"
 
-        # 2. Earnings Date (Calendar is broken in many versions, use earnings_dates)
+        # 2. Earnings Date (Robust Parsing)
         next_earnings = "Unknown"
         try:
              # Try new earnings_dates DF
             earnings_df = ticker.earnings_dates
             if earnings_df is not None and not earnings_df.empty:
-                # Find the next date in the future
-                future_dates = earnings_df.index[earnings_df.index > datetime.now()]
+                # FIX: Remove timezone info to allow comparison with naive datetime.now()
+                # This prevents "Invalid comparison between dtype=datetime64[ns, America/New_York] and datetime"
+                future_dates = earnings_df.index[earnings_df.index.tz_localize(None) > datetime.now()]
+                
                 if not future_dates.empty:
                     next_earnings = future_dates.min().strftime('%Y-%m-%d')
                 else:
@@ -187,7 +189,6 @@ def get_market_data(ticker_symbol):
         }
 
     except Exception as e:
-        # CRITICAL FIX: Log the actual error instead of swallowing it silently
         logger.error(f"⚠️ Market Data Crash for {ticker_symbol}: {e}", exc_info=True)
         return {"price": "N/A", "earnings": "Check Broker", "iv_hint": "N/A", "sector": "Unknown"}
 
