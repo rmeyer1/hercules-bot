@@ -30,6 +30,8 @@ def init_db() -> None:
         c.execute("UPDATE trades SET status = COALESCE(status, 'OPEN')")
     if 'closed_date' not in columns:
         c.execute("ALTER TABLE trades ADD COLUMN closed_date TEXT")
+    if 'long_strike' not in columns:
+        c.execute("ALTER TABLE trades ADD COLUMN long_strike REAL")
 
     c.execute(
         """CREATE INDEX IF NOT EXISTS idx_trades_chat_ticker_status
@@ -45,17 +47,10 @@ def init_db() -> None:
 
 
 def row_to_dict(row: sqlite3.Row) -> Dict:
-    return {
-        "id": row["id"],
-        "ticker": row["ticker"],
-        "type": row["type"],
-        "strike": row["strike"],
-        "entry_price": row["entry_price"],
-        "expiry": row["expiry"],
-        "status": row["status"],
-        "closed_date": row["closed_date"],
-        "date": row["date"],
-    }
+    d = dict(row)
+    # Ensure all expected keys are present, even if columns are added later
+    d.setdefault("long_strike", None)
+    return d
 
 
 def get_open_positions(chat_id: int, ticker: Optional[str] = None) -> List[Dict]:
@@ -64,7 +59,7 @@ def get_open_positions(chat_id: int, ticker: Optional[str] = None) -> List[Dict]
     c = conn.cursor()
     if ticker:
         c.execute(
-            """SELECT id, ticker, type, strike, entry_price, date, expiry, status, closed_date
+            """SELECT *
                      FROM trades
                      WHERE ticker=? AND chat_id=? AND status='OPEN'
                      ORDER BY id DESC""",
@@ -72,7 +67,7 @@ def get_open_positions(chat_id: int, ticker: Optional[str] = None) -> List[Dict]
         )
     else:
         c.execute(
-            """SELECT id, ticker, type, strike, entry_price, date, expiry, status, closed_date
+            """SELECT *
                      FROM trades
                      WHERE chat_id=? AND status='OPEN'
                      ORDER BY id DESC""",
@@ -88,7 +83,7 @@ def get_trade_by_id(trade_id: int, chat_id: int) -> Optional[Dict]:
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
     c.execute(
-        """SELECT id, ticker, type, strike, entry_price, date, expiry, status, closed_date
+        """SELECT *
                  FROM trades
                  WHERE id=? AND chat_id=? AND status='OPEN'
                  LIMIT 1""",
@@ -99,24 +94,39 @@ def get_trade_by_id(trade_id: int, chat_id: int) -> Optional[Dict]:
     return row_to_dict(row) if row else None
 
 
-def open_trade(chat_id: int, ticker: str, t_type: str, strike: float, premium: float, expiry: str) -> int:
+def open_trade(
+    chat_id: int,
+    ticker: str,
+    t_type: str,
+    strike: float,
+    premium: float,
+    expiry: str,
+    long_strike: Optional[float] = None,
+    open_date: Optional[str] = None,
+) -> int:
     """Insert a new open trade and return its id."""
     conn = sqlite3.connect('trades.db')
     c = conn.cursor()
+
+    # Use provided open_date or default to now
+    trade_date = open_date if open_date else datetime.now().strftime('%Y-%m-%d')
+
     c.execute(
-        """INSERT INTO trades (chat_id, ticker, type, strike, entry_price, date, expiry, status, closed_date)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', NULL)""",
+        """INSERT INTO trades (chat_id, ticker, type, strike, long_strike, entry_price, date, expiry, status, closed_date)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', NULL)""",
         (
             chat_id,
             ticker.upper(),
             t_type.upper(),
             float(strike),
+            float(long_strike) if long_strike else None,
             float(premium),
-            datetime.now().strftime('%Y-%m-%d'),
+            trade_date,
             expiry,
         ),
     )
     conn.commit()
     trade_id = c.lastrowid
     conn.close()
+    logger.info(f"Successfully opened trade_id {trade_id} for {ticker} ({t_type})")
     return trade_id
