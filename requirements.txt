@@ -6,3 +6,4 @@ yfinance
 pandas
 google-genai
 lxml
+Pillow
