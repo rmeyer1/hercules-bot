@@ -16,7 +16,7 @@ from handlers import (
     sentiment,
     setmodel,
     start,
-    handle_photo
+    handle_photo,
     confirm_trade
 )
 
