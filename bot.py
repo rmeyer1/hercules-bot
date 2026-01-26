@@ -17,6 +17,7 @@ from handlers import (
     setmodel,
     start,
     handle_photo
+    confirm_trade
 )
 
 load_dotenv()
