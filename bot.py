@@ -7,6 +7,9 @@ from telegram.request import HTTPXRequest
 
 from database import init_db
 from handlers import (
+    confirm_trade,
+    edit_trade,
+    handle_photo,
     help_command,
     manage,
     manage_by_id,
@@ -16,8 +19,6 @@ from handlers import (
     sentiment,
     setmodel,
     start,
-    handle_photo,
-    confirm_trade
 )
 
 load_dotenv()
@@ -45,6 +46,7 @@ def main() -> None:
     application.add_handler(CommandHandler("manageid", manage_by_id))
     application.add_handler(CommandHandler("positions", positions))
     application.add_handler(CommandHandler("open", open_trade))
+    application.add_handler(CommandHandler("edit", edit_trade))
     
     # Add the photo handler
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
