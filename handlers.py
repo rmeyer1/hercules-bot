@@ -2,7 +2,7 @@ import io
 import logging
 from datetime import datetime
 from typing import Dict, List
-
+import requests
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import CallbackContext
@@ -16,6 +16,7 @@ from ai_engine import (
 )
 from database import get_open_positions, get_trade_by_id, open_trade as open_trade_record
 from market_data import derive_sectors_for_tickers, get_market_data, is_ticker_like, normalize_tickers
+from gemini_vision import analyze_trade_screenshot
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,8 @@ HELP_TEXT = """
 /manageid [id] - Manage a specific open trade by its ID.
 /positions [ticker] - List open positions (optionally filtered by ticker).
 /open [ticker] [type] [strike] [premium] [expiry] - Logs your trade (expiry: mm/dd/yyyy).
+
+*To upload a screenshot, simply send the photo to the bot.*
 
 *Remember: The gold is in managing the position.*
 """
@@ -199,8 +202,53 @@ async def open_trade(update: Update, context: CallbackContext):
         await update.effective_message.reply_text(f"⚠️ Database/System Error: {str(e)}")
 
 
+async def handle_photo(update: Update, context: CallbackContext):
+    """Handles photo uploads for trade analysis."""
+    if not update.message.photo:
+        return
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+
+    try:
+        photo_file = await update.message.photo[-1].get_file()
+        
+        # Use requests to download the file content
+        response = requests.get(photo_file.file_path)
+        response.raise_for_status()
+        image_bytes = response.content
+
+        trade_details = analyze_trade_screenshot(image_bytes)
+
+        if not trade_details:
+            return await update.effective_message.reply_text(
+                "Could not extract trade details from the image. Please try again."
+            )
+
+        # Confirmation message
+        confirmation_message = (
+            f"Found {trade_details.get('type')} on {trade_details.get('ticker')}.\n"
+            f"Short: ${trade_details.get('short_strike')}, Long: ${trade_details.get('long_strike')}\n"
+            f"Premium: ${trade_details.get('price')}, Expiry: {trade_details.get('expiry')}\n"
+            f"Opened: {trade_details.get('open_date')}\n\n"
+            "Is this correct?"
+        )
+        
+        # Store trade_details in context for later use
+        context.user_data['trade_details'] = trade_details
+        
+        await update.effective_message.reply_text(confirmation_message) # We can add Yes/No buttons here later
+
+    except Exception as e:
+        logger.error(f"Error handling photo: {e}")
+        await update.effective_message.reply_text("An error occurred while processing the image.")
+
+
 def format_position_line(trade: Dict) -> str:
-    return f"• ID {trade['id']} — {trade['ticker']} {trade['type']} {trade['strike']} exp {trade['expiry']} entry {trade['entry_price']}"
+    line = f"• ID {trade['id']} — {trade['ticker']} {trade['type']} {trade['strike']}"
+    if trade.get('long_strike'):
+        line += f"/{trade['long_strike']}"
+    line += f" exp {trade['expiry']} entry {trade['entry_price']}"
+    return line
 
 
 async def handle_ai_request(update: Update, context: CallbackContext, model: str, prompt: str, task_type: str = 'speed'):
