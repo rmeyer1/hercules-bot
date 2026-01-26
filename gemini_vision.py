@@ -1,6 +1,7 @@
-import google.generativeai as genai
+from google import genai
 import logging
 import json
+import os
 from PIL import Image
 import io
 
@@ -17,8 +18,17 @@ def analyze_trade_screenshot(image_bytes: bytes) -> dict:
         A dictionary containing the extracted trade details.
     """
     try:
+        # Load the image from bytes
         img = Image.open(io.BytesIO(image_bytes))
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        
+        # Initialize the new Client using the environment variable
+        api_key = os.getenv('GEMINI_API_KEY')
+        if not api_key:
+            logger.error("GEMINI_API_KEY not found in environment variables.")
+            return {}
+
+        client = genai.Client(api_key=api_key)
+
         prompt = """
         Analyze this trade screenshot. Return JSON with these keys:
         * ticker: Symbol (e.g. AMD)
@@ -29,13 +39,20 @@ def analyze_trade_screenshot(image_bytes: bytes) -> dict:
         * expiry: Expiry Date (MM/DD/YYYY).
         * open_date: The date the trade was opened/filled (MM/DD/YYYY). Infer year if missing.
         """
-        response = model.generate_content([prompt, img], stream=False)
+
+        # Call the model using the new Client syntax
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[prompt, img]
+        )
         
         # Clean the response to extract the JSON part
+        # Note: The new SDK response object also has a .text property
         cleaned_response = response.text.strip().replace('```json', '').replace('```', '').strip()
         
         trade_details = json.loads(cleaned_response)
         return trade_details
+
     except Exception as e:
         logger.error(f"Error analyzing trade screenshot: {e}")
         return {}
