@@ -250,6 +250,49 @@ def format_position_line(trade: Dict) -> str:
     line += f" exp {trade['expiry']} entry {trade['entry_price']}"
     return line
 
+async def confirm_trade(update: Update, context: CallbackContext):
+    """Captures text replies to confirm/save the trade."""
+    # 1. Check if we actually have a trade waiting for confirmation
+    trade_details = context.user_data.get('trade_details')
+    if not trade_details:
+        return # Ignore random text if no trade is pending
+
+    text = update.message.text.lower().strip()
+
+    # 2. Handle "Yes" - Save to DB
+    if text in ['yes', 'y', 'confirm', 'ok']:
+        try:
+            # Clean price string just in case Gemini added a '$'
+            price_raw = str(trade_details['price']).replace('$', '')
+            
+            trade_id = open_trade_record(
+                chat_id=update.effective_chat.id,
+                ticker=trade_details['ticker'],
+                t_type=trade_details['type'],
+                strike=trade_details['short_strike'],
+                premium=price_raw,
+                expiry=trade_details['expiry'],
+                long_strike=trade_details.get('long_strike'),
+                open_date=trade_details.get('open_date')
+            )
+            
+            await update.effective_message.reply_text(f"✅ **Trade Saved!** (ID: {trade_id})")
+        
+        except Exception as e:
+            logger.error(f"Save Error: {e}")
+            await update.effective_message.reply_text(f"⚠️ Error saving trade: {e}")
+        
+        # 3. Clear memory so we don't save it twice
+        del context.user_data['trade_details']
+
+    # 4. Handle "No" - Cancel
+    elif text in ['no', 'n', 'cancel']:
+        await update.effective_message.reply_text("❌ Trade discarded.")
+        del context.user_data['trade_details']
+    
+    # 5. Handle ambiguous text
+    else:
+        await update.effective_message.reply_text("⚠️ Please reply **'Yes'** to save or **'No'** to cancel.")
 
 async def handle_ai_request(update: Update, context: CallbackContext, model: str, prompt: str, task_type: str = 'speed'):
     try:
