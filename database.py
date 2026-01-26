@@ -1,7 +1,7 @@
 import logging
 import sqlite3
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -130,3 +130,30 @@ def open_trade(
     conn.close()
     logger.info(f"Successfully opened trade_id {trade_id} for {ticker} ({t_type})")
     return trade_id
+
+
+def update_trade_field(trade_id: int, chat_id: int, field: str, value: Any) -> bool:
+    """
+    Updates a single field for a specific trade.
+    MUST validate that the trade belongs to chat_id.
+    Returns True if update was successful.
+    """
+    conn = sqlite3.connect('trades.db')
+    c = conn.cursor()
+
+    # First, verify the trade belongs to the user
+    c.execute("SELECT id FROM trades WHERE id=? AND chat_id=?", (trade_id, chat_id))
+    if c.fetchone() is None:
+        conn.close()
+        return False
+
+    try:
+        c.execute(f"UPDATE trades SET {field}=? WHERE id=?", (value, trade_id))
+        conn.commit()
+        conn.close()
+        logger.info(f"Successfully updated {field} for trade_id {trade_id}")
+        return True
+    except sqlite3.Error as e:
+        logger.error(f"Failed to update trade {trade_id}: {e}")
+        conn.close()
+        return False

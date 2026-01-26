@@ -14,7 +14,7 @@ from ai_engine import (
     resolve_model,
     set_user_model,
 )
-from database import get_open_positions, get_trade_by_id, open_trade as open_trade_record
+from database import get_open_positions, get_trade_by_id, open_trade as open_trade_record, update_trade_field
 from market_data import derive_sectors_for_tickers, get_market_data, is_ticker_like, normalize_tickers
 from gemini_vision import analyze_trade_screenshot
 
@@ -31,6 +31,7 @@ HELP_TEXT = """
 /manageid [id] - Manage a specific open trade by its ID.
 /positions [ticker] - List open positions (optionally filtered by ticker).
 /open [ticker] [type] [strike] [premium] [expiry] - Logs your trade (expiry: mm/dd/yyyy).
+/edit [id] [field] [new_value] - Modify an open position.
 
 *To upload a screenshot, simply send the photo to the bot.*
 
@@ -324,3 +325,59 @@ async def handle_ai_request(update: Update, context: CallbackContext, model: str
     except Exception as e:
         logger.error("Bot Reply Error: %s", e)
         await update.effective_message.reply_text(f"⚠️ System Error: {str(e)}")
+
+
+async def edit_trade(update: Update, context: CallbackContext):
+    """
+    Command: /edit [id] [field] [new_value]
+    """
+    args = context.args
+    if len(args) != 3:
+        return await update.effective_message.reply_text("Usage: /edit [ID] [FIELD] [NEW_VALUE]")
+
+    trade_id, field, new_value = args
+    chat_id = update.effective_chat.id
+
+    FIELD_MAP = {
+        'ticker': 'ticker',
+        'type': 'type',
+        'strike': 'strike',
+        'short': 'strike',
+        'long': 'long_strike',
+        'price': 'entry_price',
+        'premium': 'entry_price',
+        'expiry': 'expiry',
+        'date': 'date',
+        'opened': 'date'
+    }
+
+    db_field = FIELD_MAP.get(field.lower())
+    if not db_field:
+        return await update.effective_message.reply_text(f"Invalid field: {field}")
+
+    # Type Conversion
+    if db_field in ['strike', 'long_strike', 'entry_price']:
+        try:
+            new_value = float(new_value)
+        except ValueError:
+            return await update.effective_message.reply_text("New value must be a number for this field.")
+    elif db_field in ['date', 'expiry']:
+        try:
+            datetime.strptime(new_value, '%Y-%m-%d')
+        except ValueError:
+            return await update.effective_message.reply_text("Date must be in YYYY-MM-DD format.")
+
+    trade_before = get_trade_by_id(trade_id, chat_id)
+    if not trade_before:
+        return await update.effective_message.reply_text(f"Trade ID {trade_id} not found.")
+
+    old_value = trade_before[db_field]
+
+    success = update_trade_field(trade_id, chat_id, db_field, new_value)
+
+    if success:
+        await update.effective_message.reply_text(
+            f"✅ Updated Trade {trade_id}: '{db_field}' changed from {old_value} to {new_value}."
+        )
+    else:
+        await update.effective_message.reply_text(f"⚠️ Failed to update trade {trade_id}.")
