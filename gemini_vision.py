@@ -18,7 +18,7 @@ def analyze_trade_screenshot(image_bytes: bytes) -> dict:
     """
     try:
         img = Image.open(io.BytesIO(image_bytes))
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash')
         prompt = """
         Analyze this trade screenshot. Return JSON with these keys:
         * ticker: Symbol (e.g. AMD)
