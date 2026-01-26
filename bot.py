@@ -49,6 +49,10 @@ def main() -> None:
     # Add the photo handler
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
+    # NEW: Add the text listener for confirmations
+    # filters.TEXT & ~filters.COMMAND ensures we don't block commands like /start
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_trade))
+
     logger.info("Bot is running...")
     application.run_polling()
 
