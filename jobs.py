@@ -27,25 +27,40 @@ async def scheduled_market_scan(context: CallbackContext) -> None:
         logger.info("No open trades to scan.")
         return
 
-    for trade in trades:
+    logger.info(f"Found {len(trades)} open trades to scan.")
+
+    # enumerate(trades, 1) starts the counter at 1 for cleaner logs (e.g., "1/8")
+    for i, trade in enumerate(trades, 1):
         try:
             ticker = trade["ticker"]
             chat_id = trade["chat_id"]
+            
+            # Log exactly which trade is being processed
+            logger.info(f"Processing {i}/{len(trades)}: Trade ID {trade['id']} ({ticker})")
 
             market = get_market_data(ticker)
             prompt = build_manage_prompt(trade, market)
 
             model = resolve_model(chat_id, "manage")
+            
+            # Await the response to ensure we finish one trade before starting the next
             response, _ = await call_ai(model, prompt, task_type="reasoning")
 
             message = f"🔔 Scheduled Check: {ticker} {trade['type']}\n\n{response}"
-            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode="Markdown")
+            
+            # FIX APPLIED: Removed parse_mode="Markdown"
+            # This ensures the message is delivered reliably as plain text,
+            # avoiding crashes if the AI generates special characters (like underscores).
+            await context.bot.send_message(chat_id=chat_id, text=message)
 
-            # Prevent hitting provider rate limits when many trades are open
+            # Sleep 2 seconds to prevent hitting API rate limits
             await asyncio.sleep(2)
 
         except Exception as exc:  # noqa: BLE001
+            # Catch individual trade errors so the entire batch doesn't fail
             logger.error("Failed to auto-manage trade %s: %s", trade.get("id"), exc, exc_info=True)
+            
+    logger.info("Scheduled market scan completed.")
 
 
 def schedule_weekday_jobs(job_queue, jobs: Iterable[dict]) -> None:
