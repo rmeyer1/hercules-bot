@@ -7,3 +7,4 @@ pandas
 google-genai
 lxml
 Pillow
+pytz

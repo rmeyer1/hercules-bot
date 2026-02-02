@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import datetime, time, timedelta
 
 from dotenv import load_dotenv
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
@@ -20,6 +21,7 @@ from handlers import (
     setmodel,
     start,
 )
+from jobs import EST, schedule_weekday_jobs, scheduled_market_scan
 
 load_dotenv()
 
@@ -54,6 +56,32 @@ def main() -> None:
     # NEW: Add the text listener for confirmations
     # filters.TEXT & ~filters.COMMAND ensures we don't block commands like /start
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_trade))
+
+    # Register weekday market scans (Eastern Time)
+    market_jobs = [
+        {"time": time(9, 30, tzinfo=EST), "callback": scheduled_market_scan, "name": "scan_market_open"},
+        {"time": time(12, 0, tzinfo=EST), "callback": scheduled_market_scan, "name": "scan_midday"},
+        {"time": time(15, 45, tzinfo=EST), "callback": scheduled_market_scan, "name": "scan_power_hour"},
+    ]
+    schedule_weekday_jobs(application.job_queue, market_jobs)
+
+    # Optional: quick local verification window (minutes from now), still weekdays only
+    test_offset = os.getenv("SCHEDULE_TEST_MINUTES")
+    if test_offset:
+        try:
+            minutes = int(test_offset)
+            now_est = datetime.now(EST) + timedelta(minutes=minutes)
+            test_time = now_est.time().replace(microsecond=0)
+            today = datetime.now(EST).weekday()
+            application.job_queue.run_daily(
+                scheduled_market_scan,
+                test_time,
+                days=(today,),
+                name="scan_test_run",
+            )
+            logger.info("Scheduled test market scan at %s EST for weekday index %s", test_time.strftime("%H:%M"), today)
+        except ValueError:
+            logger.warning("Invalid SCHEDULE_TEST_MINUTES value: %s", test_offset)
 
     logger.info("Bot is running...")
     application.run_polling()

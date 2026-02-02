@@ -94,6 +94,25 @@ def get_trade_by_id(trade_id: int, chat_id: int) -> Optional[Dict]:
     return row_to_dict(row) if row else None
 
 
+def get_all_open_trades() -> List[Dict]:
+    """
+    Retrieve all open trades across all users.
+    Used by scheduled jobs to broadcast manage checks.
+    """
+    conn = sqlite3.connect('trades.db')
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute(
+        """SELECT *
+                 FROM trades
+                 WHERE status='OPEN'
+                 ORDER BY id DESC"""
+    )
+    rows = [row_to_dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
 def open_trade(
     chat_id: int,
     ticker: str,
