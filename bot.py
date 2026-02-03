@@ -57,13 +57,16 @@ def main() -> None:
     # filters.TEXT & ~filters.COMMAND ensures we don't block commands like /start
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_trade))
 
-    # Register weekday market scans (Eastern Time)
-    market_jobs = [
-        {"time": time(9, 30, tzinfo=EST), "callback": scheduled_market_scan, "name": "scan_market_open"},
-        {"time": time(12, 0, tzinfo=EST), "callback": scheduled_market_scan, "name": "scan_midday"},
-        {"time": time(15, 45, tzinfo=EST), "callback": scheduled_market_scan, "name": "scan_power_hour"},
-    ]
-    schedule_weekday_jobs(application.job_queue, market_jobs)
+    # DISABLED: Scheduled weekday market scans (Eastern Time)
+    # These 3x daily telegram jobs have been disabled per user request.
+    # To re-enable, uncomment the following block:
+    #
+    # market_jobs = [
+    #     {"time": time(9, 30, tzinfo=EST), "callback": scheduled_market_scan, "name": "scan_market_open"},
+    #     {"time": time(12, 0, tzinfo=EST), "callback": scheduled_market_scan, "name": "scan_midday"},
+    #     {"time": time(15, 45, tzinfo=EST), "callback": scheduled_market_scan, "name": "scan_power_hour"},
+    # ]
+    # schedule_weekday_jobs(application.job_queue, market_jobs)
 
     # Optional: quick local verification window (minutes from now), still weekdays only
     test_offset = os.getenv("SCHEDULE_TEST_MINUTES")
