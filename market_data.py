@@ -51,6 +51,8 @@ def get_market_data(ticker_symbol: str) -> Dict[str, str]:
             "earnings": next_earnings,
             "iv_hint": info.get("beta", "N/A"),
             "sector": info.get("sector", "Unknown"),
+            "dma_50": info.get("fifty_day_average", "N/A"),
+            "dma_200": info.get("two_hundred_day_average", "N/A"),
         }
 
     except Exception as e:

@@ -102,8 +102,12 @@ def build_manage_prompt(trade: Dict, market: Dict) -> str:
             f"Expiry: {trade['expiry']} (Opened: {trade['date']})"
         )
 
+    dma_info = ""
+    if market.get('dma_50') != 'N/A' and market.get('dma_200') != 'N/A':
+        dma_info = f" 50-DMA: ${market['dma_50']:.2f}, 200-DMA: ${market['dma_200']:.2f}."
+
     return (
-        f"Manage {trade['ticker']}. {entry_info}. Current Market Price: ${market['price']}. "
+        f"Manage {trade['ticker']}. {entry_info}. Current Market Price: ${market['price']}.{dma_info} "
         f"Today: {datetime.now().strftime('%Y-%m-%d')}. "
         f"Calculate current profit/loss based on decay. "
         f"Evaluate 50% profit target and provide Net Credit Roll advice."
