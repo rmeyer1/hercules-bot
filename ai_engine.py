@@ -80,11 +80,27 @@ def build_ticker_sentiment_prompt(tickers: List[str], sector_map: Dict[str, str]
 
 
 def build_manage_prompt(trade: Dict, market: Dict) -> str:
-    entry_info = (
-        f"Position: {trade['type']} @ Strike: ${trade['strike']}. "
-        f"Premium Collected: ${trade['entry_price']}. "
-        f"Expiry: {trade['expiry']} (Opened: {trade['date']})"
-    )
+    # Detect if this is a spread (has long_strike)
+    long_strike = trade.get('long_strike')
+    
+    if long_strike:
+        # It's a spread - calculate max risk
+        spread_width = abs(trade['strike'] - long_strike)
+        max_risk = spread_width - trade['entry_price']  # width - credit received
+        entry_info = (
+            f"Position: {trade['type']} Credit Spread @ Short Strike: ${trade['strike']} "
+            f"/ Long Strike: ${long_strike} (Width: ${spread_width:.2f}). "
+            f"Net Premium Collected: ${trade['entry_price']}. "
+            f"Max Risk: ${max_risk:.2f} per spread. "
+            f"Expiry: {trade['expiry']} (Opened: {trade['date']})"
+        )
+    else:
+        # Single leg (CSP or CC)
+        entry_info = (
+            f"Position: {trade['type']} @ Strike: ${trade['strike']}. "
+            f"Premium Collected: ${trade['entry_price']}. "
+            f"Expiry: {trade['expiry']} (Opened: {trade['date']})"
+        )
 
     return (
         f"Manage {trade['ticker']}. {entry_info}. Current Market Price: ${market['price']}. "
